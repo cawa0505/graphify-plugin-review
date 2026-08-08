@@ -1,14 +1,31 @@
 # graphify-plugin-review
 
-Graphify ecosystem **Code Review plugin**: a first-party, embedded Rust crate
-(implementing the `GraphifyPlugin` trait) that provides structured code review
-analysis — change detection, impact radius, and review context — running directly
-on Graphify Core's in-memory petgraph. All `review*` tools are auto-registered by
-GraphifyMCP at startup.
+Dual-role monorepo built around `code-review-graph` (Python, tirth8205) as the single
+starting point, showing two evolution paths:
+
+1. **Native Rust rewrite** — a first-party, embedded Rust crate (implementing the
+   `GraphifyPlugin` trait) that provides structured code review analysis — impact
+   radius, callers, entrypoints, flows — running directly on Graphify Core's
+   in-memory petgraph. All `review*` tools are auto-registered by GraphifyMCP at
+   startup.
+2. **SDK integration demo** — how a future Graphify SDK (Layer 2) integrates an MCP
+   tool originally written in a different language (Python): the fork in
+   `legacy/code-review-graph/`, the SDK adapter draft in `sdk/`, and the
+   walkthrough in `docs/integration/`.
 
 > **Status**: documentation-first phase. Analysis targets and architecture are
 > specified in `openspec/`; the crate skeleton awaits the graphify-core v1
 > contract alignment.
+
+## Repository layout
+
+```
+├── crates/                  # native Rust rewrite (embedded GraphifyPlugin)
+├── sdk/                     # SDK adapter draft (Python tool ↔ SDK protocol)
+├── legacy/code-review-graph/     # original Python tool (fork, reference)
+├── docs/integration/        # SDK-into-foreign-MCP integration walkthrough
+└── openspec/                # proposal / design / tasks (this change)
+```
 
 ## Why native
 
@@ -22,8 +39,9 @@ persists its own SQLite store, and ships 30+ tools. The native plugin:
   dependency load.
 - **Converges the tool set** — a minimal `review*` surface (impact, callers,
   entrypoints, flows), not 30 tools.
-- **Zero mock** — every analysis runs against the real in-memory graph and real
-  git state.
+- **Zero mock** — every analysis runs against the real in-memory graph; change
+  detection comes from Graphify Core's `on_graph_updated` (`modified_nodes`),
+  not a re-implemented git diff.
 
 ### Performance targets (vs Python upstream)
 
@@ -53,6 +71,6 @@ persists its own SQLite store, and ships 30+ tools. The native plugin:
 
 ## Reference
 
-- Upstream source is kept locally in `github-sourcecode/` (gitignored, reference
-  only — not part of this repository).
+- Upstream Python source is kept as a fork in `legacy/code-review-graph/`
+  (reference material, `.git` stripped — tracked for the SDK integration demo).
 - Full architecture and task breakdown: `openspec/changes/code-review-native-plugin/`.

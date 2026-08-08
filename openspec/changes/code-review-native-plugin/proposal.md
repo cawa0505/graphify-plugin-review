@@ -13,14 +13,20 @@ knowledge graph with 30+ MCP tools, SQLite persistence, and Tree-sitter parsing.
 its tools are registered as an independent MCP server, and its runtime is Python (not native to the Graphify
 Rust ecosystem).
 
-We want a **first-party, native Rust review plugin** embedded in Graphify that:
+This repo is a **dual-role monorepo** built around that single Python starting point, showing two evolution
+paths:
 
-1. Reuses Graphify Core's in-memory petgraph (`GraphOutput`) as the single source of truth — no duplicate
-   graph, no SQLite mirror, no separate parser pipeline for the common path.
-2. Exposes a **minimal, coherent set of `review*` tools** (detect_changes, impact radius, review context)
-   registered automatically by GraphifyMCP — not 30 tools, not a standalone server.
-3. Aligns with the plugin ecosystem contract: `workspace_key` routing (graphify-core v1), `sync_toon`
-   payload exchange, and the same YAGNI/zero-mock rules as handoff/opendoc.
+1. **SDK integration demo** — how the (future, Layer 2) Graphify SDK integrates an MCP tool originally
+   written in a different language (Python): the fork lives in `legacy/code-review-graph/`, the SDK
+   adapter/protocol draft in `sdk/`, and the integration walkthrough in `docs/integration/`.
+2. **Native Rust rewrite** — a first-party, embedded review plugin (the subject of this change) that:
+
+   1. Reuses Graphify Core's in-memory petgraph (`GraphOutput`) as the single source of truth — no
+      duplicate graph, no SQLite mirror, no separate parser pipeline for the common path.
+   2. Exposes a **minimal, coherent set of `review*` tools** (impact, callers, entrypoints, flows)
+      registered automatically by GraphifyMCP — not 30 tools, not a standalone server.
+   3. Aligns with the plugin ecosystem contract: `workspace_key` routing (graphify-core v1), `sync_toon`
+      payload exchange, and the same YAGNI/zero-mock rules as handoff/opendoc.
 
 ## Out of Scope (YAGNI)
 
@@ -40,6 +46,6 @@ We want a **first-party, native Rust review plugin** embedded in Graphify that:
 
 ## Reference Material
 
-- Upstream source (local-only, gitignored): `github-sourcecode/` — `tirth8205/code-review-graph` v2.3.6, MIT.
+- Upstream source (fork, tracked): `legacy/code-review-graph/` — `tirth8205/code-review-graph` v2.3.6, MIT.
 - Graphify Core v1 contract: `WorkspaceContext{workspace_key, workspace_name, root_path, timestamp}`,
   `GraphOutput` (petgraph), `sync_toon(Vec<u8>)`.

@@ -6,27 +6,56 @@
 - **Decision**: Go (staged) — pending graphify-core v1 contract alignment
 - **Evaluation basis**: oracle architecture review of upstream `code-review-graph` (Python) vs native Rust embedded plugin
 
-## Architecture
+## 定位：雙重角色 monorepo
 
-### 定位
+`graphify-plugin-review` 是一個 monorepo，同時示範兩件事（同一個 Python 起點，
+展示兩條進化路徑）：
 
-`graphify-plugin-review` 是 Graphify 內嵌型 Rust crate，實作 `GraphifyPlugin` trait，
-分析直接運行於 Graphify Core 記憶體內的 petgraph（`GraphOutput`）之上 — 不建獨立圖、
-不持 SQLite、不跑自己的解析管線（共用 Graphify 的圖）。
+1. **SDK 整合示範** — 展示「SDK 怎麼接入一個原本是 Python 寫的 MCP tool」：
+   `legacy/code-review-graph/`（原始 Python tool，fork 自 tirth8205）+ `sdk/`
+   （SDK 接入層/協議草稿）+ `docs/integration/`（整合過程紀錄）。
+2. **Rust rewrite 示範** — `crates/` 下的原生重寫：Graphify 內嵌型 Rust crate，
+   實作 `GraphifyPlugin` trait，直接吃 Graphify 的 AST / petgraph。
+
+```
+graphify-plugin-review/
+├── crates/                  # 原生 Rust rewrite（本文件主體）
+│   └── graphify-plugin-review/   # embedded crate, implements GraphifyPlugin
+├── sdk/                     # SDK 接入層草稿（Python tool 如何對接 SDK 協議）
+├── legacy/code-review-graph/     # 原始 Python tool（fork, reference）
+├── docs/integration/        # SDK 整合進不同語言 MCP 的過程紀錄
+└── openspec/                # 本變更的 proposal / design / tasks
+```
+
+### 原生 Rust rewrite 定位
+
+`crates/graphify-plugin-review` 分析直接運行於 Graphify Core 記憶體內的 petgraph
+（`GraphOutput`）之上 — 不建獨立圖、不持 SQLite、不跑自己的解析管線（共用 Graphify 的圖）。
 
 ```
 graphify-mcp (GraphifyRust)
   └─ 註冊 review* tools
        └─ graphify-plugin-review (embedded crate, implements GraphifyPlugin)
             └─ 讀 Graphify Core 記憶體 petgraph (GraphOutput)
-                 └─ git diff → 變更節點 → BFS impact → review context
+                 └─ on_graph_updated(modified_nodes) → BFS impact → review context
 ```
 
-### 與 Graphify Core 契約對齊
+### 與 Graphify Core 契約對齊（v1 已驗證）
 
+直接驗證自 `graphify-core/src/`（2026-08-09）：
+
+- `GraphifyPlugin` trait：`get_id / bind / get_workspace_key / sync_toon(Option<Vec<u8>>) -> Vec<u8> / on_graph_updated`
 - `WorkspaceContext{workspace_key, workspace_name, root_path, timestamp}` — `bind` 時注入
+- `GraphUpdateEvent{workspace_key, modified_nodes: Vec<NodeId>, event}` — **變更偵測來源是
+  core 主動推送的 `on_graph_updated`，plugin 不需要自己跑 git diff**（Phase 2 若要
+  「任意 commit 間比較」才需另議 git 歷史）
+- `NodeId(pub String)`；`Node{id, label, file_type, kind, language, source_file, start_line, end_line, ...}`
+- `Edge{source, target, relation: String, source_file, confidence, ...}` — relation 為**小寫**
+  （`"calls"` / `"contains"` / `"exports"` / `"imports"` / `"member_of"`）
+- `GraphOutput{nodes, edges, metadata}`；`build_graph` 建 DiGraph + node_map
+- `query_bfs` / `find_shortest_path` — BFS 與最短路徑 primitive 已公開
+- `from_toon` / `to_toon` — `.toon` 序列化與 graphify-core 共用
 - `workspace_key` 為跨 plugin 對齊鍵（handoff / review / opendoc 共用）
-- 同步 `GraphifyPlugin` 介面：`get_id / bind / get_workspace_key / sync_toon / on_graph_updated`
 
 ### 零 Mock 原則
 
@@ -55,7 +84,7 @@ graphify-mcp (GraphifyRust)
 | 工具 | 對應上游 | 資料來源 |
 |------|---------|---------|
 | `review_impact` | `get_impact_radius` | petgraph BFS from changed nodes, depth 2 |
-| `review_entrypoints` | `detect_entry_points` | 無 incoming CALLS 的函數 + 框架裝飾器 |
+| `review_entrypoints` | `detect_entry_points` | 無 incoming `calls` 的函數 + 框架裝飾器 |
 | `review_flows` | `trace_flows` | 執行路徑追蹤 + 關鍵度 |
 | `review_callers` | `get_edges_by_target` | 反向呼叫追蹤 |
 
