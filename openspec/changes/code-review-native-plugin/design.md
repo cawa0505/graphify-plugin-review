@@ -14,16 +14,14 @@
 | 軌 | 組件 | 落點 | 定位 |
 |----|------|------|------|
 | **A** | Rust 原生 Review Plugin | `crates/graphify-plugin-review/` | 16ms 極致效能、單一二進位、記憶體 petgraph 直接操作 |
-| **B** | Graphify Python SDK (`graphify-sdk`) | `sdk/` | 官方對外 Python 打底基礎設施（高階 async API） |
+| **B** | Graphify Python SDK (`graphify-sdk-python`) | 官方 repo（`sdk/` 為 pointer） | 官方對外 Python 打底基礎設施（高階 async API） |
 | **B** | 改版 Python Code Review MCP | `python/review-mcp/` | SDK 的第一個 first-class client（拓撲感知審查） |
 
 ```
 graphify-plugin-review/
 ├── crates/
 │   └── graphify-plugin-review/   # [軌 A] embedded crate, implements GraphifyPlugin
-├── sdk/                          # [軌 B] graphify-sdk（Python 官方 SDK，可抽出結構）
-│   ├── pyproject.toml            #   package: graphify-sdk
-│   └── graphify_sdk/             #   client.py / api.py / workspace.py
+├── sdk/                          # pointer → 官方 repo graphify-sdk-python
 ├── python/
 │   └── review-mcp/               # [軌 B] 改版 Python Review MCP（SDK first-class client）
 ├── legacy/code-review-graph/     # 原始 Python tool（fork, reference, 不動）
@@ -50,7 +48,7 @@ graphify-mcp (GraphifyRust)
 - `get_blast_radius(git_diff/files, depth=3)`：索取經 `.toon` 壓縮的衝擊半徑拓撲
 - `query_symbol_topology(symbol_name)`：查詢符號上下游呼叫鏈拓撲
 - 自動透傳 `workspace_key`，Python 開發者/Agent 無需手動處理底層 Schema
-- **可抽出結構**：pyproject 與模組獨立，API 穩定後 `git mv` 即可無痛抽出為獨立 repo
+- **落點**：已獨立為官方 repo `graphify-sdk-python`（本 repo `sdk/` 為 pointer）
 
 ### [軌 B] 改版 Python Review MCP 定位
 

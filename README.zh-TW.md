@@ -10,7 +10,7 @@
 目標：16ms 零開銷、單一二進位、記憶體級 git diff 拓撲解析
 （經由 proposed 的 `analyze_diff_impact` trait 方法）。
 
-**軌 B — Graphify Python SDK + 改版 MCP**（`sdk/` + `python/review-mcp/`）：
+**軌 B — Graphify Python SDK + 改版 MCP**（`graphify-sdk-python` + `python/review-mcp/`）：
 `graphify-sdk` 是 Graphify 官方對外（Python 生態圈）的打底基礎設施（高階
 async API、Stdio/JSON-RPC 封裝、`workspace_key` 透傳）。改版 Python Review MCP
 是它的**第一個 first-class client**：100% 沿用成熟 Python Review Skills，並透過
@@ -25,7 +25,7 @@ async API、Stdio/JSON-RPC 封裝、`workspace_key` 透傳）。改版 Python Re
 ```
 ├── crates/
 │   └── graphify-plugin-review/   # [軌 A] 原生 Rust rewrite（內嵌 GraphifyPlugin）
-├── sdk/                          # [軌 B] graphify-sdk（官方 Python SDK，可抽出結構）
+├── sdk/                          # pointer → 官方 repo graphify-sdk-python
 ├── python/
 │   └── review-mcp/               # [軌 B] 改版 Python Review MCP（SDK first-class client）
 ├── legacy/code-review-graph/     # 原始 Python tool（fork, reference）
@@ -80,7 +80,8 @@ Review 工作流程，但作為獨立程序它重複 Graphify 的圖、持自有
 ## 開發
 
 - 軌 A（Rust）：`cargo build` / `cargo check` / `cargo clippy` / `cargo test`
-- 軌 B（Python）：見 `sdk/README.md` 與 `docs/integration/`
+- 軌 B（Python）：SDK 位於官方 repo `graphify-sdk-python`；整合流程見
+  `docs/integration/`。
 
 ## 參考
 

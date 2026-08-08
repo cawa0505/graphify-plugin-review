@@ -4,7 +4,7 @@
 > 阻塞相依：graphify-core v1 `GraphifyPlugin` trait / `GraphOutput` 需存在（GraphifyRust 側，已確認）。
 > 本 repo 為**雙軌平行 monorepo（Dual-Track Evolutionary）**：
 > 軌 A = 原生 Rust rewrite（`crates/`）；軌 B = graphify-sdk（`sdk/`）+ 改版 Python MCP（`python/review-mcp/`）。
-> SDK 落點定案：graphify-sdk 先放 `sdk/`，以可抽出結構建置（API 穩定後可無痛 `git mv` 成獨立 repo）。
+> SDK 落點定案：獨立為官方 repo `graphify-sdk-python`（本 repo `sdk/` 為 pointer）。
 
 ## Task 1: 文件與契約對齊（文件先行）
 - [x] 上游研究：`legacy/code-review-graph/`（tirth8205/code-review-graph v2.3.6 fork）架構盤點
@@ -16,7 +16,7 @@
 - [x] 雙語 README 建立（英文 + 台灣繁體中文）
 
 ## Task 1.5: SDK 整合示範文件（雙軌）
-- [x] `sdk/` 目錄：graphify-sdk 定位與可抽出結構（pyproject 獨立、模組獨立）
+- [x] `sdk/` 目錄：graphify-sdk 定位（後定案獨立為官方 repo，`sdk/` 改 pointer）
 - [x] `docs/integration/`：SDK library 整合進原本是不同語言寫的 MCP 的過程紀錄（定位與目錄結構）
 - [x] README 補上雙軌定位說明與目錄導覽
 
@@ -35,8 +35,9 @@
 - [ ] 16ms BFS impact trace 效能預算驗證
 - [ ] （待 GraphifyRust 對齊後）`analyze_diff_impact(&self, ctx, git_diff, graph)` trait 方法實作
 
-## Task 4: [軌 B] graphify-sdk（Python）
-- [ ] `pyproject.toml`：package `graphify-sdk`（可抽出結構）
+## Task 4: [軌 B] graphify-sdk-python（外部 repo）
+- [ ] 開發於官方 repo `graphify-sdk-python`（`sdk/` pointer → 該 repo）
+- [ ] `pyproject.toml`：package `graphify-sdk`（依官方 repo 慣例）
 - [ ] `graphify_sdk/client.py`：`GraphifyClient(workspace_key)` — Stdio/JSON-RPC 封裝 + 進程生命週期
 - [ ] `graphify_sdk/api.py`：`get_blast_radius(git_diff/files, depth=3)` / `query_symbol_topology(symbol_name)`（async）
 - [ ] `graphify_sdk/workspace.py`：workspace_key 透傳
@@ -64,4 +65,3 @@
 - Community detection：僅在真實需求出現時實作
 - 上游 Python `code-review-graph` 向後相容橋接 → 同 handoff 決議：無 MCP 註冊需求即無橋接必要
 - `analyze_diff_impact` trait 方法：屬 GraphifyRust plugin.rs forward contract，未對齊前不實作
-- graphify-sdk 是否抽成獨立 repo：API 穩定後再評估（現行 `sdk/` 為可抽出結構）

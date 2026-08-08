@@ -20,7 +20,7 @@ the Graphify SDK's first-class client:
 | 組件 | 落點 | 定位 |
 |------|------|------|
 | 1. **Rust 原生 Review Plugin** | `crates/graphify-plugin-review/` | 極致效能：16ms 零開銷、單一二進位、記憶體內直接操作 petgraph |
-| 2. **Graphify Python SDK** (`graphify-sdk`) | `sdk/` | 官方對外 Python 打底基礎設施：高階 Async API、Stdio/JSON-RPC 封裝、workspace_key 透傳 |
+| 2. **Graphify Python SDK** (`graphify-sdk-python`) | 官方 repo（`sdk/` 為 pointer） | 官方對外 Python 打底基礎設施：高階 Async API、Stdio/JSON-RPC 封裝、workspace_key 透傳 |
 | 3. **改版 Python Code Review MCP** | `python/review-mcp/` | SDK 的第一個 first-class client：全盤繼承 Python 資產 + `get_blast_radius` 降維打擊升級 |
 
 Track A — native Rust rewrite (the subject of this change):

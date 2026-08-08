@@ -11,7 +11,7 @@ in-memory petgraph. `review*` tools are auto-registered by GraphifyMCP at startu
 Target: 16ms zero-overhead, single binary, memory-level git-diff topology parsing
 (via the proposed `analyze_diff_impact` trait method).
 
-**Track B — Graphify Python SDK + revamped MCP** (`sdk/` + `python/review-mcp/`):
+**Track B — Graphify Python SDK + revamped MCP** (`graphify-sdk-python` + `python/review-mcp/`):
 `graphify-sdk` is Graphify's official Python-facing infrastructure (high-level async
 API, Stdio/JSON-RPC encapsulation, `workspace_key` passthrough). The revamped Python
 Review MCP is its **first first-class client**: it inherits 100% of the mature Python
@@ -27,7 +27,7 @@ review skills and upgrades them into topology-aware review by injecting
 ```
 ├── crates/
 │   └── graphify-plugin-review/   # [Track A] native Rust rewrite (embedded GraphifyPlugin)
-├── sdk/                          # [Track B] graphify-sdk (official Python SDK, extractable structure)
+├── sdk/                          # pointer → official repo graphify-sdk-python
 ├── python/
 │   └── review-mcp/               # [Track B] revamped Python Review MCP (SDK first-class client)
 ├── legacy/code-review-graph/     # original Python tool (fork, reference)
@@ -85,7 +85,8 @@ persists its own SQLite store, and ships 30+ tools. The native plugin:
 ## Development
 
 - Track A (Rust): `cargo build` / `cargo check` / `cargo clippy` / `cargo test`
-- Track B (Python): see `sdk/README.md` and `docs/integration/`
+- Track B (Python): the SDK lives at `graphify-sdk-python` (official repo); see
+  `docs/integration/` for the integration walkthrough.
 
 ## Reference
 
