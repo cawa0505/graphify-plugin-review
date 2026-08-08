@@ -6,28 +6,32 @@
 - **Decision**: Go (staged) — pending graphify-core v1 contract alignment
 - **Evaluation basis**: oracle architecture review of upstream `code-review-graph` (Python) vs native Rust embedded plugin
 
-## 定位：雙重角色 monorepo
+## 定位：雙軌平行 + 漸進式演進（Dual-Track Evolutionary）
 
-`graphify-plugin-review` 是一個 monorepo，同時示範兩件事（同一個 Python 起點，
-展示兩條進化路徑）：
+`graphify-plugin-review` 是一個 monorepo，以同一個 Python 起點（`code-review-graph`）
+展示兩條平行的進化路徑，以及 Graphify SDK 的第一個 first-class client：
 
-1. **SDK 整合示範** — 展示「SDK 怎麼接入一個原本是 Python 寫的 MCP tool」：
-   `legacy/code-review-graph/`（原始 Python tool，fork 自 tirth8205）+ `sdk/`
-   （SDK 接入層/協議草稿）+ `docs/integration/`（整合過程紀錄）。
-2. **Rust rewrite 示範** — `crates/` 下的原生重寫：Graphify 內嵌型 Rust crate，
-   實作 `GraphifyPlugin` trait，直接吃 Graphify 的 AST / petgraph。
+| 軌 | 組件 | 落點 | 定位 |
+|----|------|------|------|
+| **A** | Rust 原生 Review Plugin | `crates/graphify-plugin-review/` | 16ms 極致效能、單一二進位、記憶體 petgraph 直接操作 |
+| **B** | Graphify Python SDK (`graphify-sdk`) | `sdk/` | 官方對外 Python 打底基礎設施（高階 async API） |
+| **B** | 改版 Python Code Review MCP | `python/review-mcp/` | SDK 的第一個 first-class client（拓撲感知審查） |
 
 ```
 graphify-plugin-review/
-├── crates/                  # 原生 Rust rewrite（本文件主體）
-│   └── graphify-plugin-review/   # embedded crate, implements GraphifyPlugin
-├── sdk/                     # SDK 接入層草稿（Python tool 如何對接 SDK 協議）
-├── legacy/code-review-graph/     # 原始 Python tool（fork, reference）
-├── docs/integration/        # SDK 整合進不同語言 MCP 的過程紀錄
-└── openspec/                # 本變更的 proposal / design / tasks
+├── crates/
+│   └── graphify-plugin-review/   # [軌 A] embedded crate, implements GraphifyPlugin
+├── sdk/                          # [軌 B] graphify-sdk（Python 官方 SDK，可抽出結構）
+│   ├── pyproject.toml            #   package: graphify-sdk
+│   └── graphify_sdk/             #   client.py / api.py / workspace.py
+├── python/
+│   └── review-mcp/               # [軌 B] 改版 Python Review MCP（SDK first-class client）
+├── legacy/code-review-graph/     # 原始 Python tool（fork, reference, 不動）
+├── docs/integration/             # SDK 整合進不同語言 MCP 的過程紀錄
+└── openspec/                     # 本變更的 proposal / design / tasks
 ```
 
-### 原生 Rust rewrite 定位
+### [軌 A] 原生 Rust rewrite 定位
 
 `crates/graphify-plugin-review` 分析直接運行於 Graphify Core 記憶體內的 petgraph
 （`GraphOutput`）之上 — 不建獨立圖、不持 SQLite、不跑自己的解析管線（共用 Graphify 的圖）。
@@ -39,6 +43,23 @@ graphify-mcp (GraphifyRust)
             └─ 讀 Graphify Core 記憶體 petgraph (GraphOutput)
                  └─ on_graph_updated(modified_nodes) → BFS impact → review context
 ```
+
+### [軌 B] graphify-sdk 定位
+
+- `GraphifyClient(workspace_key)`：自動處理與 graphify-mcp 的 Stdio/JSON-RPC 通訊與進程生命週期
+- `get_blast_radius(git_diff/files, depth=3)`：索取經 `.toon` 壓縮的衝擊半徑拓撲
+- `query_symbol_topology(symbol_name)`：查詢符號上下游呼叫鏈拓撲
+- 自動透傳 `workspace_key`，Python 開發者/Agent 無需手動處理底層 Schema
+- **可抽出結構**：pyproject 與模組獨立，API 穩定後 `git mv` 即可無痛抽出為獨立 repo
+
+### [軌 B] 改版 Python Review MCP 定位
+
+- 100% 沿用成熟 Python 資產（Skills / Prompt 範本 / 安全與效能檢查）
+- 收到 PR / git diff 時透過 graphify-sdk 發 `get_blast_radius(git_diff)` 取得拓撲地圖
+- 將 `{{ topology_impact_toon }}` 注入 Review Prompt — 讓 LLM 能對照 `.toon` 拓撲
+  精準警告「這行修改會破壞 2 階以外遠端模組的呼叫鏈（Breaking Change Risk）」
+- 暴露 `review_pull_request(workspace_key, git_diff, modified_files)` 供
+  OpenCode / Cursor / LLM Agent 呼叫
 
 ### 與 Graphify Core 契約對齊（v1 已驗證）
 
@@ -56,6 +77,27 @@ graphify-mcp (GraphifyRust)
 - `query_bfs` / `find_shortest_path` — BFS 與最短路徑 primitive 已公開
 - `from_toon` / `to_toon` — `.toon` 序列化與 graphify-core 共用
 - `workspace_key` 為跨 plugin 對齊鍵（handoff / review / opendoc 共用）
+
+### Forward Contract：`analyze_diff_impact`（[待討論]）
+
+[軌 A] 提出新增 trait 方法（v1 目前無此方法；屬 GraphifyRust `graphify-core/src/plugin.rs`
+領域，本文件僅記錄提案，未對齊前不當作已定案）：
+
+```rust
+fn analyze_diff_impact(&self, ctx: &WorkspaceContext, git_diff: &str, graph: &GraphOutput) -> ReviewOutput;
+```
+
+- 記憶體級 git diff 拓撲解析：直接接收 `git_diff` 與 `&GraphOutput` 指針
+- 毫秒級解析 diff 中被修改的 Struct/Function 符號，在 petgraph 執行 BFS（1–3 階半徑）
+- 找出直接與間接受衝擊的下游呼叫鏈（Callers）
+- 原生 Prompt 上下文合成：在 Rust 記憶體內將 git diff 與 `.toon` 衝擊子圖合併，
+  直接產出含拓撲資訊的 Review 上下文（MVP 用 `format!`，暫不引入 Tera/Jinja2）
+- 對齊時機：GraphifyRust 將 plugin.rs 補上此方法後，Task 3 的 trait 實作才能完整落地
+
+### SDK 語言順序（supersedes D5）
+
+SDK roadmap D5 原順序 TS → Python → PHP → Rust → Go（暫緩）。本變更將 **Python 提前**
+（graphify-sdk 作為官方 Python 對外基礎設施），supersede 該順序的 Python 項。
 
 ### 零 Mock 原則
 
