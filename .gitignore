@@ -5,9 +5,6 @@ target
 AGENTS.md
 LOCAL-NOTES.md
 
-# Upstream reference clone (tirth8205/code-review-graph) — reference only
-github-sourcecode/
-
 # Local runtime state
 .code-review-graph/
 .cortexkit/
