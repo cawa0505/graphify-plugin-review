@@ -75,6 +75,24 @@ impl ReviewPlugin {
         self
     }
 
+    /// 以 `cwd` 合成 `WorkspaceContext` 並 bind（CLI 整合模式，比照 opendoc）。
+    #[must_use]
+    pub fn bind_for_cli(mut self, cwd: impl AsRef<Path>) -> Self {
+        let cwd_ref = cwd.as_ref();
+        let workspace_key = graphify_core::plugin::derive_workspace_key(cwd_ref);
+        let name = cwd_ref
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "workspace".to_string());
+        let ctx = WorkspaceContext::new(
+            workspace_key,
+            name,
+            cwd_ref.to_string_lossy().into_owned(),
+        );
+        self.bind(ctx);
+        self
+    }
+
     fn registry_path(&self) -> PathBuf {
         self.registry_path
             .clone()
@@ -140,7 +158,9 @@ impl ReviewPlugin {
             }
 
             db.upsert(&ReviewBinding {
-                workspace_key: payload.workspace_key.clone(),
+                // 採用 plugin 當前 bound 的 workspace_key（與 relay/opendoc 一致）；
+                // IngestPayload 的 workspace_key 僅作為 CRG 端來源標記，不參與綁定。
+                workspace_key: self.workspace_key.clone(),
                 id: review.review_id.clone(),
                 canonical_node_id: canonical,
                 file_path: review.file_path.clone(),
