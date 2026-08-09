@@ -1,81 +1,66 @@
-# Proposal — Code Review Native Plugin
+# Proposal — graphify-plugin-review（Symbol-Native Review Bridge）
 
-## Status
+## Executive Summary
 
-- **Date**: 2026-08-09
-- **Decision**: Pending (documentation-first; crate skeleton awaits graphify-core v1 contract alignment)
+`graphify-plugin-review` 是 Graphify 專用的 **Review 橋接器 (Symbol-Native
+Review Bridge)**：以 `code-review-graph`（CRG）為單一 Review 資料源，將
+CRG 產出的結構化 Review 點位（`file_path` + `line_number`）透過 Graphify
+Core AST 圖譜 **0ms 升維對齊**至 canonical symbol（Symbol Path，如
+`crate::auth::verify`），並託管於本地 `graphify.db`。當程式碼改動觸及
+高風險審查點位時，透過 `graphify-mcp` 主動廣播警示與自動銷案，
+形成完整 Review 防禦閉環。
+
+本 plugin **不重造 Code Review 引擎** — 它是純 bridge。
 
 ## Problem Statement
 
-Code review in AI coding tools currently relies on `code-review-graph` (Python, tirth8205) — a local-first
-knowledge graph with 30+ MCP tools, SQLite persistence, and Tree-sitter parsing. This works, but it is a
-**standalone process outside Graphify**: its graph is separate from Graphify Core's in-memory memory graph,
-its tools are registered as an independent MCP server, and its runtime is Python (not native to the Graphify
-Rust ecosystem).
+- **行號脆弱性 (Line-based Fragility)**：傳統 Review 工具僅記錄
+  `file_path + line_number`，重構或增刪行數後點位立即失效。
+- **重構開銷**：在 plugin 內重新用 Rust 實作完整 Review 引擎開銷巨大；
+  Agent 現場執行重型 Review 導致 context 污染與延遲暴增。
+- **資訊孤島**：Agent 重構時缺乏對歷史 Review Warnings 的即時感知，
+  容易重複犯下曾被標記的 Security / Correctness 錯誤。
 
-This repo is a **dual-track evolutionary monorepo** — 雙軌平行 + 漸進式演進 — built around a
-single Python starting point (`code-review-graph`), showing **two parallel evolution paths** and
-the Graphify SDK's first-class client:
+## 方向變更記錄
 
-| 組件 | 落點 | 定位 |
-|------|------|------|
-| 1. **Rust 原生 Review Plugin** | `crates/graphify-plugin-review/` | 極致效能：16ms 零開銷、單一二進位、記憶體內直接操作 petgraph |
-| 2. **Graphify Python SDK** (`graphify-sdk-python`) | 官方 repo（`sdk/` 為 pointer） | 官方對外 Python 打底基礎設施：高階 Async API、Stdio/JSON-RPC 封裝、workspace_key 透傳 |
-| 3. **改版 Python Code Review MCP** | `python/review-mcp/` | SDK 的第一個 first-class client：全盤繼承 Python 資產 + `get_blast_radius` 降維打擊升級 |
+- 先前雙軌方案（Track A native rewrite + Track B Python SDK）已廢止。
+- `legacy/`（Python fork）、`sdk/`、`python/`、`docs/integration/` 已刪除。
+- Python SDK 發展移至獨立 repo（graphify-sdk-python），不在本 repo 討論。
 
-Track A — native Rust rewrite (the subject of this change):
+## Proposed Solution：B + A 混合模式（Slice 0 零阻礙發行）
 
-1. Reuses Graphify Core's in-memory petgraph (`GraphOutput`) as the single source of truth — no
-   duplicate graph, no SQLite mirror, no separate parser pipeline for the common path.
-2. Exposes a **minimal, coherent set of `review*` tools** (impact, callers, entrypoints, flows)
-   registered automatically by GraphifyMCP — not 30 tools, not a standalone server.
-3. Aligns with the plugin ecosystem contract: `workspace_key` routing (graphify-core v1), `sync_toon`
-   payload exchange, and the same YAGNI/zero-mock rules as handoff/opendoc.
+### 選項 B — File-based Import（Slice 0 主路徑，100% 確定性）
 
-Track B — Graphify Python SDK + revamped MCP:
+- `review_ingest` 讀取標準 `IngestPayload` JSON 檔案（CRG 導出格式）。
+- 與 opendoc Layer 1 同哲學：離線落盤、零外部依賴、零 CRG 介面風險。
+- Slice 0 核心能力（line-to-symbol 升維、review_bindings 寫入、.toon
+  拓撲合成、review_get_context 查詢）立即 100% 閉環。
 
-1. `GraphifyClient(workspace_key)` auto-handles Stdio/JSON-RPC with graphify-mcp and process lifecycle.
-2. `get_blast_radius(git_diff/files, depth)` / `query_symbol_topology(symbol_name)` — high-level async API.
-3. The revamped MCP keeps 100% of the mature Python skills/prompts/checks, and injects
-   `{{ topology_impact_toon }}` into the review prompt so the LLM can flag cross-module
-   breaking-change risks beyond line-level diff.
+### 選項 A — CRG MCP Analysis 接入（crg_client.rs 骨架）
 
-## Forward Contract (proposed, [待討論])
+- `crg_client.rs` 實作 MCP Handshake（Rust 說 MCP Protocol），作為即時
+  分析工具的調用骨架（對接 CRG 現有 4 tools）。
+- Slice 0 預留介面，不阻擋主路徑。
 
-Track A proposes a **new trait method** on `GraphifyPlugin` (graphify-core v1 currently exposes only
-`get_id / bind / get_workspace_key / sync_toon / on_graph_updated`):
+### 選項 C — CRG 規格提案（Slice 1/2）
 
-```rust
-fn analyze_diff_impact(&self, ctx: &WorkspaceContext, git_diff: &str, graph: &GraphOutput) -> ReviewOutput;
-```
+- `search_reviews` / `resolve_review` 整理為 CRG RFC / Feature Request
+  開出，等待外部 CRG 社群或下一階段疊代 — 完全不阻擋當前進度。
 
-This is a **forward contract owned by GraphifyRust** (`graphify-core/src/plugin.rs`) — documented here
-as proposed, not binding, until graphify-core lands it.
+## Key Decisions（裁決紀錄）
 
-## SDK Language Order (supersedes D5)
+| # | 裁決 | 內容 |
+|---|------|------|
+| R1 | canonical_node_id | = Symbol Qualified Name（`crate::auth::verify`），穩定外鍵；內部 hash NodeId 僅為圖內指針，不作綁定鍵 |
+| R2 | MCP 歸屬 | plugin 不寫 MCP Protocol Server；review* 工具由 graphify-mcp 自動註冊；ImpactAlert 為 domain event 由 graphify-mcp 轉發 |
+| R3 | Sampling | 砍除（反向 LLM 採樣過度複雜，回歸確定性映射 + drift resolution） |
+| R4 | SQLite | 併入專案共用 graphify.db（review_bindings 表），不單獨開檔 |
+| R5 | Bridge 優先 | 純 bridge 不重造引擎；legacy Python fork 已刪除 |
 
-SDK roadmap D5 originally ordered TS → Python → PHP → Rust → Go (暫緩). This change **promotes Python
-first** (graphify-sdk as the official Python-facing infrastructure), superseding that order for Python.
+## Success Criteria
 
-## Out of Scope (YAGNI)
-
-- Porting all 30 upstream MCP tools / flows / communities / embeddings to Rust.
-- Re-implementing a SQLite graph store — Graphify Core's petgraph is the graph.
-- A standalone stdio/HTTP MCP server — graphify-mcp owns transport and registration.
-- Web visualization (upstream D3.js) — not requested for the plugin.
-- Template engine (Tera/Jinja2) in Track A — `format!` suffices for MVP.
-
-## Proposed Direction
-
-- **Crate**: `graphify-plugin-review` (package) / `graphify_plugin_review` (lib) — embedded plugin, no binary.
-- **Trait**: implement `GraphifyPlugin` + (proposed) `analyze_diff_impact`.
-- **Analysis on demand**: `review_impact` (BFS from changed nodes, default depth 2), `review_callers`
-  (reverse callers), `review_entrypoints` (no incoming `calls`), `review_flows` (path tracing).
-- **Zero mock**: analysis runs against the real in-memory graph and real git state; no fixtures, no fake data.
-- **16ms Trace**: BFS impact trace budget is a **performance target** for the common path, not a hard SLA.
-
-## Reference Material
-
-- Upstream source (fork, tracked): `legacy/code-review-graph/` — `tirth8205/code-review-graph` v2.3.6, MIT.
-- Graphify Core v1 contract: `WorkspaceContext{workspace_key, workspace_name, root_path, timestamp}`,
-  `GraphOutput` (petgraph), `sync_toon(Vec<u8>)`.
+- Slice 0：`review_ingest`（file-based）→ resolver 升維 → `review_bindings`
+  寫入 → `review_get_context` 查詢，全鏈路 100% 本地閉環、測試覆蓋。
+- graphify-mcp 啟動時自動註冊 3 個 review* tools。
+- 零網絡依賴（Slice 0）、零 mock、確定性輸出。
+- 開源安全：版本控制無私有主機名、本地 IP、本機路徑。
