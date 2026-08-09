@@ -72,6 +72,10 @@
 
 ### 4.1 IngestPayload（CRG 輸入契約，schema 1.0）
 
+> `workspace_key` 欄位僅作為 CRG 端 provenance 標記；plugin 端綁定一律以
+> 當前 bound 的 `GraphifyPlugin::get_workspace_key()` 為範圍（與 relay /
+> opendoc 一致），不採用 payload 內的值。
+
 ```json
 {
   "version": "1.0",
