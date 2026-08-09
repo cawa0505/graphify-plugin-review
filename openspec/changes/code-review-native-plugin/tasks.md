@@ -37,18 +37,43 @@
 
 ## Slice 1 — Drift Guard & Auto-Resolution（雙向銷案與漂移防禦）
 
-- [ ] **T1.1 Signature Hash Tracking**：寫入 review_bindings 時計算
-      AST 節點結構 hash
-- [ ] **T1.2 on_graph_updated Auto-Resolver**：偵測 AST 變動，若問題已
-      修正則更新 status = resolved
-- [ ] **T1.3 review_resolve 工具完整化**：手動/自動銷案介面
-- [ ] **T1.4 CRG RFC 開出**：`search_reviews` / `resolve_review` 需求規格
-      （選項 C）
+> 細部 spec：design.md §7。CRG 端 RFC：`crg-requirements.md`。
+
+- [ ] **T1.1 Signature Hash 範圍裁決**：實作 YAGNI 砍法（保留 schema
+      欄但無比對路徑）；schema migration `ALTER TABLE review_bindings
+      ADD COLUMN resolution_reason TEXT DEFAULT ''
+      , ADD COLUMN resolved_at TEXT DEFAULT ''
+      , ADD COLUMN resolved_by TEXT DEFAULT ''`
+      — **[待使用者裁決 §7.2]**
+- [ ] **T1.2 on_graph_updated Auto-Resolver**：對 workspace 內所有
+      `status='unresolved' AND canonical_node_id != ''` 的 binding，檢查
+      canonical_node_id 是否還存在於當前快取 GraphOutput 的節點集 — 不存在
+      → 自動標 `resolved` + `resolved_by='auto:node_gone'` +
+      `resolved_at=now()` + `resolution_reason` 留 plugin 預設值。
+- [ ] **T1.3 review_resolve 工具完整化**：`review_resolve` /
+      `reviewResolve` 接受新 `resolved_by` 與 `resolution_reason` 參數
+      （手動 path）；本地 graphify.db 更新 + 回應中含完整狀態。CRG 端
+      反向銷案走 `crg_client.resolve_review` — 此部分 **不阻塞 T1.2**，
+      local 銷案在 CRG API 到位前可獨立 ship。
+- [ ] **T1.4 CRG RFC 交付**：本文 `crg-requirements.md` 開出
+      `search_reviews` / `resolve_review` 規格；提交給 CRG 端等待排程
+      （graphify 端不依賴 R1/R2 已上線，純交付）。
 
 ## Slice 2 — Real-time Impact Guard（雙向主動衝擊防禦）
 
-- [ ] **T2.1 Impact Radius Inspection**：on_graph_updated 沿變動節點 BFS
-      衝擊半徑，檢查觸及未解決 high/critical Review 節點
-- [ ] **T2.2 ImpactAlert domain event**：產出 event 交 graphify-mcp 轉發
-      `notifications/review/impact_alert`
-- [ ] **T2.3 graphify-mcp 協商**：與 GraphifyRust 協商 ImpactAlert 轉發機制
+> 細部 spec：design.md §8。graphify-core v1.1 延伸需求見 §10。
+
+- [ ] **T2.1 Impact Radius Inspection Engine**：在 `on_graph_updated`
+      中以 `event.modified_nodes` 為種子，用 graphify-core `query_bfs`
+      `max_depth=2` 逆向邊走 BFS。**前置確認**：
+      graphify-core 有無公開 `GraphOutput → DiGraph` helper — 若無，
+      提需求給 GraphifyRust 開 v1.1（或 plugin 端自寫轉換並標
+      ponytail 註解）。
+- [ ] **T2.2 ImpactAlert Domain Event 產出**：對 BFS 涵蓋集合內每個
+      node，查 unresolved high/critical → 結構化 `ImpactAlert` 結構
+      （design §8.2）。
+- [ ] **T2.3 graphify-mcp 轉發 ImpactAlert**：與 GraphifyRust 協商
+      trait v1.1 延伸（design §8.3 方案選定：推薦方案 A 透過 trait 注入
+      notify callback closure）；溝通完成後
+      graphify-mcp 端把 ImpactAlert 序列化為 MCP
+      `notifications/review/impact_alert` 推送。

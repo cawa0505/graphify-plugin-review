@@ -95,111 +95,262 @@
 }
 ```
 
-### 4.2 review_bindings 表（graphify.db 內）
+### 4.2 review_bindings 表（graphify.db 內，Slice 0 已 shipped 原樣）
 
 ```sql
 CREATE TABLE IF NOT EXISTS review_bindings (
-  Id TEXT PRIMARY KEY,             -- CRG review_id
-  Canonical_node_id TEXT NOT NULL, -- Symbol Path (crate::auth::verify)
-  File_path TEXT NOT NULL,         -- 原始檔案路徑
-  Line_number INTEGER NOT NULL,    -- 綁定時之行號
-  Signature_hash TEXT NOT NULL,    -- 綁定時該 AST 節點的結構 hash
-  Severity TEXT NOT NULL,          -- critical | high | medium | low | info
-  Category TEXT NOT NULL,          -- security | performance | correctness | style
-  Comment TEXT NOT NULL,
-  Status TEXT DEFAULT 'unresolved',-- unresolved | resolved | dismissed
-  Created_at TEXT NOT NULL,
-  Updated_at TEXT NOT NULL
+    workspace_key     TEXT NOT NULL,     -- plugin 當前 bound 的 workspace_key
+    id                TEXT NOT NULL,    -- CRG review_id（IngestPayload 內）
+    canonical_node_id TEXT NOT NULL,    -- GraphOutput Node.id 原樣：{file}:{kind}:{name}
+    file_path         TEXT NOT NULL,    -- 原始 IngestPayload 行號所屬檔
+    line_number       INTEGER NOT NULL, -- 綁定時之行號（僅記錄用，不參與查詢鍵）
+    signature_hash    TEXT NOT NULL,    -- 預留：Slice 1+ 結構漂移偵測
+    severity          TEXT NOT NULL,    -- critical | high | medium | low | info
+    category          TEXT NOT NULL,    -- security | performance | correctness | style
+    comment           TEXT NOT NULL,    -- CRG 原評語
+    status            TEXT NOT NULL DEFAULT 'unresolved', -- unresolved|resolved|dismissed
+    created_at        TEXT NOT NULL,    -- RFC 3339
+    updated_at        TEXT NOT NULL,   -- RFC 3339
+    PRIMARY KEY (workspace_key, id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_review_node ON review_bindings(canonical_node_id);
-CREATE INDEX IF NOT EXISTS idx_review_status ON review_bindings(status);
+CREATE INDEX IF NOT EXISTS idx_review_node
+    ON review_bindings (workspace_key, canonical_node_id);
+CREATE INDEX IF NOT EXISTS idx_review_status
+    ON review_bindings (workspace_key, status);
 ```
 
-> 裁決 R4：SQLite 併入既有 graphify.db（opendoc 同款 pattern — plugin
-> 對同一檔案開自己的 rusqlite 連線 + `CREATE TABLE IF NOT EXISTS`），
+> 裁決 R4：SQLite 併入既有 graphify.db（與 opendoc 同款 pattern — plugin
+> 對同一檔開自己的 `rusqlite::Connection` + `CREATE TABLE IF NOT EXISTS`），
 > 不單獨開檔，避免檔案鎖衝突與多 DB 管理成本。
+>
+> workspace_key 範圍規則（與 relay / opendoc 一致）：bindings 一律以此 plugin
+> 當前 bound 的 `GraphifyPlugin::get_workspace_key()` 為查詢範圍；
+> `IngestPayload.workspace_key`（CRG 端 provenance）只記錄於原始 `source`
+> 而不寫入此表 — Slice 0 已修正更行（commit `69fa8bb`）。
 
-## 5. Canonical Node ID 語意（裁決 R1）
+## 5. Canonical Node ID 語意（Slice 0 已修訂）
 
-- `Canonical_node_id` = **Symbol Qualified Name**（如 `crate::auth::verify`），
-  是穩定且人可讀的外鍵。
-- Graphify 內部的純整數/hash NodeId 是圖譜內部指針，會隨重新 parsing
-  變動 — **不作為綁定鍵**。
-- 查詢時，`resolver.rs` 線掃 GraphOutput，把 `file_path + line_number`
-  映射到當前 AST 節點的 canonical symbol — AST 重建或行號小幅位移後
-  綁定關係依然穩定。
-- GraphOutput 由 `sync_toon(Some(toon))` 收到，plugin 用 `from_toon`
-  反序列化後快取於記憶體（0ms 本地線掃）。
+- `canonical_node_id` = **Graphify extract 實際產生的 `Node.id`** 格式為
+  `{file_path}:{kind}:{name}`（如 `src/auth.rs:function:verify_token`），
+  **不是**早期 spec 假設的 `crate::auth::verify` 點號形式。
+- 內部 `NodeId(String)` 是 graphify-core 唯一的節點識別字串，**會隨 extract
+  設定而帶 `./` 前綴**（相對路徑執行時）— Slice 0 已對齊：
+  `resolver.rs` 回傳 `Node.id` 原樣，使本 plugin 與
+  `GraphUpdateEvent.modified_nodes` 共用同一 namespace
+  （orbit memory #3515 / #3516 確認）。
+- `resolver.rs` 的線掃規則：在當前快取的 GraphOutput 中，找 `source_file`
+  相符且 `start_line <= line <= end_line` 的節點；多重命中取 **最內層**
+  （span 最小者）；找不到 → binding `canonical_node_id` 存空字串
+  （`""` 表示 orphan，仍寫入 review_bindings 供 `review_get_context("")`
+  查回）。
+- 行號小幅位移（不影響 Node.id）→ 綁定查詢仍命中
+  （這正是「行號脆弱性」解法的核心）；Node.id **改變**（rename / 換檔 /
+  換 kind）→ 舊 binding 變成 orphan — Slice 1 `on_graph_updated`
+  auto-resolver 利用此訊號判定「問題已不存在」。
 
-## 6. MCP 介面（經 graphify-mcp 自動註冊）
+## 6. MCP 介面（經 graphify-mcp 自動註冊，Slice 0 已 shipped）
 
-| Tool | 型態 | 說明 |
-|------|------|------|
-| `review_ingest` | Command/Mutating | 載入 CRG JSON 檔案 → 升維綁定 → 寫入 graphify.db。Input: `{path}`。Output: `{success, bound_count, orphan_lines_count}` |
-| `review_get_context` | Read-Only | 查詢指定 symbol（含衝擊半徑）未解決評語。Input: `{canonical_node_id, include_impact_radius}` |
-| `review_resolve` | Command/Mutating | 標記 review 為 resolved（手動或自動）。Input: `{review_id, resolution_reason}` |
+| Tool | 型態 | 輸入 | 輸出 |
+|------|------|------|------|
+| `reviewIngest` | Mutating | `{path: string}` | `{bound_count, orphan_lines_count}` |
+| `reviewGetContext` | Read | `{canonical_node_id: string}` | `{unresolved: [{review_id, severity, category, comment, file_path, line_number}]}` |
+| `reviewResolve` | Mutating | `{review_id: string, reason?: string}` | `{resolved: review_id, status}` |
 
 > 裁決 R2：plugin 不實作 MCP server；工具由 graphify-mcp 於啟動時
-> auto-register（handoff relay*/opendoc opendoc* 同款）。
+> auto-register（handoff `relay*` / opendoc `opendoc*` 同款）。
+>
+> graphify-mcp 對 `reviewIngest` 的特殊接手：呼叫 plugin 前，
+> 先從 workspace 圖快取（`GraphState.graph_data`）取得 `GraphOutput`
+> 並 `sync_toon(Some(toon_bytes))` 餵給 plugin，使 resolver 有圖可線掃。
+> （此 graph-feed 抽手在 GraphifyRust `424cd72` 已 shipped。）
 
-## 7. 事件模型（Slice 1/2）
+## 7. Slice 1 — Drift Guard & Auto-Resolution（本批細部規格）
 
-- **ImpactAlert domain event**：`on_graph_updated` 鉤子中比對變動節點與
-  `review_bindings` 表；觸及 high/critical 未解決節點時產出
-  `ImpactAlert { modified_node_id, impacted_review_node, review_id, severity, alert_message }`。
-- **graphify-mcp 轉發**：graphify-mcp 監聽該 event，透過現有 MCP transport
-  發送 `notifications/review/impact_alert` 給 client。
-- **Auto-Resolution**：偵測到 AST 結構修復（signature_hash 比對）時，
-  呼叫 `crg_client.resolve_review()` 雙向銷案。
-- **Sampling 已砍除**：反向採樣引入過度雙向複雜度；回歸
-  「0ms 線掃確定性映射 + 手動/自動 drift resolution」。
+### 7.1 觸發模型
 
-## 8. Slice 路線圖
+核心觀察：**Node.id 是綁定鍵；GraphOutput 在 `sync_toon` 時被整個替換**。
+因此每次 `on_graph_updated(event)` 收到時，plugin 已持有「事件過後的」新
+GraphOutput 快取。Auto-resolver 只需做：
 
-### Slice 0（當前）— 基礎單向 Bridge（零網絡、100% 確定性）
+> 對此 `workspace_key` 底下所有 `status='unresolved'` 的 binding，
+> 若其 `canonical_node_id` 不存在於當前快取 GraphOutput 的節點集合
+> (不含空字串 orphan — orphan 保留待人工) → 標記 `status='resolved'`、
+> `resolution_reason='auto: node gone'`、`updated_at = now()`。
 
-- [x] repo 清理：砍 `legacy/`（Python fork）、`sdk/`、`python/`、`docs/integration/`
-- [x] docs 重寫（本文件 + proposal + tasks + 雙語 README）
-- [ ] Crate 建立（Cargo.toml + GraphifyPlugin trait 實作）
-- [ ] `registry.rs`：review_bindings DDL + DAO
-- [ ] `ingest.rs`：IngestPayload JSON 解析 → 轉譯
-- [ ] `resolver.rs`：Line-to-Symbol Resolver（對 GraphOutput 線掃）
-- [ ] `sync.rs`：sync_toon 快取 GraphOutput
-- [ ] `review.rs`：review_ingest / review_get_context / review_resolve 業務 API
-- [ ] `crg_client.rs`：MCP Client 骨架（Rust 說 MCP Protocol，對接 CRG 4 tools）
-- [ ] graphify-mcp auto-registration + e2e
+此邏輯**完全不依賴 `event.modified_nodes`** — 更穩健（modified_nodes 只列
+變動者，不列刪除者；依賴它會漏判消失節點）。
 
-### Slice 1 — Drift Guard & Auto-Resolution
+### 7.2 Signature Hash：YAGNI 提案 [待討論]
 
-- [ ] signature_hash 比對：代碼結構改變時自動檢查修復狀態
-- [ ] `on_graph_updated` 自動銷案（呼叫 CRG resolve_review）
-- [ ] `review_resolve` 工具鏈完整化
+原 spec 將 `signature_hash`（「AST 節點結構 hash」）作為 Slice 1 T1.1
+標配，意圖偵測「節點 id 未變但內部結構已變」。實作上顯著的問題：
 
-### Slice 2 — Real-time Impact Guard
+1. graphify-core v1 的 `GraphifyPlugin` trait **不暴露 AST handle**，只剩
+   `sync_toon` 收到的 `GraphOutput` 欄位（`id` / `label` / `kind` /
+   `source_file` / `start_line` / `end_line` / `doc_comment` / `description` /
+   `metadata`）。除掉會 cosmetic-flip 的（`doc_comment`、`description`、
+   `metadata`）與會自然漂移的（`start_line` / `end_line`），可算「結構」僅剩
+   `{label, kind, file_type, language}` — 但任何這幾個改動都連帶改 `Node.id`
+   （file/kind/name 是 Node.id 的格構成元），不會出現「id 不變但結構變」的
+   場景。
+2. 即便能算出有效 hash，「hash 變但節點還在」對應的是「同一符號內容重構」
+   — review 註解通常**仍然適用**（如「verify_token 中 use constant-time
+   compare」不會因內部重構而失效）。標 `drifted` 待人工與直接靜默不動
+   幾乎沒區別。
 
-- [ ] 訂閱 Core AST Event Bus（`on_graph_updated`）
-- [ ] 沿變動節點 BFS 衝擊半徑，檢查觸及 high/critical 未解決節點
-- [ ] 產出 ImpactAlert domain event → graphify-mcp 轉發
-      `notifications/review/impact_alert`
+**Ponytail 提案**：Slice 1 砍 `signature_hash` 的「比對實作」task，僅保留欄
+位（schema 已 ready，無成本）。Node 消失即自動銷案，足以覆蓋 99% 漂移
+場景。真如有 rename + body-preserving + review 該轉移的個案需求浮現
+再回頭加。 **[待使用者裁決]**
 
-## 9. 對 graphify-core v1 契約驗證
+### 7.3 review_resolve 完整化
+
+- Slice 0 已交付手動 `review_resolve`（CLI / MCP 都打通）。
+- Slice 1 補上 local DB 內 `resolution_reason` 欄（schema 變更：
+  `ALTER TABLE … ADD COLUMN resolution_reason TEXT`）+ `resolved_at`。
+- **CRG 端反向銷案（`crg_client.resolve_review`）與 v1 host 解耦**：
+  本 plugin 自動銷案的訊號只在本 plugin 的 graphify.db 內變更；
+  CRG 端要同步銷，需 CRG 真有開出 `resolve_review` MCP 工具（見 §9
+  CRG RFC）。Slice 1 不阻塞 — 即便 CRG 端沒接，plugin 那邊也呈現 resolved
+  狀態，Agent 查詢就收得到「已處理」訊號。
+
+### 7.4 驗收準則（Slice 1）
+
+- [ ] `on_graph_updated` 實作：給定 fixture {binding_to_node_A, unrelated_node_B_to_review} → 將 A 自 graph 移除後 sync_toon + on_graph_updated → A 的 binding 自動 resolved，unrelated 仍 unresolved。
+- [ ] schema migration 不破壞已 shipped bindings（`ALTER TABLE … ADD COLUMN resolution_reason` 在舊 schema 上存在資料時可用）。
+- [ ] 不引入任何網路依賴（`: ureq` 不被 Slice 1 強制）。
+- [ ] graphify-mcp 3 tool 行為與 Slice 0 完全 binary-兼容；新增 `resolved_by`
+      欄位在 response 內是 optional 且對舊 client 透明。
+
+## 8. Slice 2 — Real-time Impact Guard（本批細部規格）
+
+### 8.1 衝擊半徑 BFS 公式
+
+- 觸發：`on_graph_updated(event)` 中 `event.modified_nodes` 非空。
+- BFS 種子 = `event.modified_nodes`（實際變動節點）。
+- 在 plugin 自己的快取 GraphOutput 上用 graphify-core `query_bfs` 以種子為根、
+  `max_depth = 2`（預設；與 `code-review-graph` 的
+  `detect_changes_tool` 預設對齊）走逆向邊（往 upstream callers）。
+- 注意：現在 plugin 持有 `GraphOutput`（plain nodes/edges Vec）並非 `DiGraph`
+  — 必須 `GraphOutput → DiGraph` 轉換 + `find_shortest_path` /
+  query_bfs。**graphify-core 需要公開一個 `GraphOutput → DiGraph` 的
+  helper**，否則 plugin 自寫轉換重現 core 邏輯（YAGNI 風險）。
+  **[待 graphify-core API 確認]**
+
+### 8.2 Impact Alert 判定與狀態
+
+- 對 BFS 涵蓋集合內每個 node，查 `review_bindings` 中
+  `workspace_key = 此工作區 AND canonical_node_id = node.id AND
+  status = 'unresolved' AND severity IN ('critical', 'high')`。
+- 命中 → 產 `ImpactAlert` domain event：
+  ```
+  ImpactAlert {
+      workspace_key:   String,
+      modified_node:   NodeId,           // 觸發變動的種子
+      impacted_node:   NodeId,           // BFS 涵蓋內含 review 的節點
+      review_ids:      Vec<String>,      // 命中 review 的 id 清單
+      severities:      Vec<String>,      // 對應 severity
+      max_severity:    String,           // critical > high > medium ...
+      alert_message:   String,           // 產業格式化訊息，供 mcp 轉發
+      event_id:        String,           // uuid v4
+      generated_at:   String,            // RFC 3339
+  }
+  ```
+
+### 8.3 接 graphify-mcp 轉發（graphify-mcp 協商點）
+
+graphify-mcp 監聽什麼？v1 trait 不含 `subscribe_impact_alert` 之類的
+host-side API。供選方案（待 GraphifyRust 協商）:
+
+- **方案 A**：plugin 在 `on_graph_updated` 內直接 `notify_impact_alert(...)`
+  呼叫透過 trait 注入的 callback closure → graphify-mcp 在建構 plugin時注入
+  寫入 `mcp_notify_tx` 的 closure，把 ImpactAlert 序列化為 MCP
+  `notifications/review/impact_alert` 推送。**需 trait v1.1 加 callback
+  欄位或 constructor hook**。
+- **方案 B**：plugin 把 ImpactAlert 寫入 graphify.db 或共用 ring buffer；
+  graphify-mcp 自己 poll 取出轉發。 高 latency、輪詢成本。
+- **方案 C**：v1 trait 新增 `take_impact_alerts(&mut self) -> Vec<ImpactAlert>`
+  方法讓 host 每輪 event 後取走。**需 trait v1.1**。
+
+推薦 **方案 A**（最低 latency、與 trait 哲學一致）。**待 GraphifyRust 端
+協商 v1.1 變更 [待討論]。**
+
+### 8.4 驗收準則（Slice 2）
+
+- [ ] `on_graph_updated` 中 BFS depth=2，命中 unresolved high/critical
+      binding → 產 ImpactAlert；fixture 含 critical upstream caller 觸發
+      種子變動時 event 落地。
+- [ ] graphify-mcp 端 ImpactAlert → MCP notification 轉發通道打通
+      （依 §8.3 選定方案）。
+- [ ] 效能：fixture 50 節點 + 5 reviews 全鏈路（sync_toon → on_graph_updated
+      → BFS → alerts）< 50ms。
+- [ ] 不阻斷：on_graph_updated 中的 BFS 失敗（如 GraphOutput 空白）不丟
+      panic，只回 Err + 寫 log 一行（與 Slice 0 「plugin 永不 panic」契約一致）。
+
+## 9. Slice 路線圖（commit 已落地）
+
+### Slice 0 — 基礎單向 Bridge（shipped）
+
+- [x] repo 清理：砍 `legacy/` + `sdk/` + `python/` + `docs/integration/` — `c344dc4`
+- [x] docs 重寫（design / proposal / tasks / 雙語 README）— `c344dc4`
+- [x] Crate 建立（Cargo.toml + 7 模組 GraphifyPlugin trait 實作）— `c344dc4`
+- [x] `registry.rs`：review_bindings DDL + DAO（workspace_key scoped PK）— `c344dc4`
+- [x] `ingest.rs`：IngestPayload JSON 解析 — `c344dc4`
+- [x] `resolver.rs`：line→symbol innermost span 匹配（回傳 Node.id 原樣含 `./` 前綴）— `c344dc4`
+- [x] `sync.rs`：sync_toon → from_toon 全寬容快取 — `c344dc4`
+- [x] `lib.rs`：業務 API review_ingest / review_ingest_file /
+      review_get_context / review_resolve（workspace_key 範圍規則修正）—
+      `c344dc4` + `69fa8bb`
+- [x] `crg_client.rs`：MCP-over-HTTP 骨架（ureq，Box<ureq::Error>）— `c344dc4`
+- [x] graphify-cli `review` 子指令 + graphify-mcp 3 review\* tools
+      auto-register + e2e — GraphifyRust `424cd72`；tasks 同步 `4c5fdc2`
+- [x] 33/33 plugin tests + 21/21 mcp tests + clippy clean
+
+### Slice 1 — Drift Guard & Auto-Resolution（待動工，本 spec 已就緒）
+
+- [ ] T1.1 `signature_hash` YAGNI 裁決 + schema migration
+      (`ALTER TABLE ADD COLUMN resolution_reason` 和 `resolved_at`)
+- [ ] T1.2 `on_graph_updated` auto-resolver：node 消失 → resolved
+- [ ] T1.3 `review_resolve` 加 `resolution_reason` 與 `resolved_by`
+      欄位回填
+- [ ] T1.4 CRG RFC：`search_reviews` / `resolve_review` 需求規格書
+      開出（見 `crg-requirements.md`）
+
+### Slice 2 — Real-time Impact Guard（待 graphify-core v1.1 協商）
+
+- [ ] T2.1 BFS 衝擊半徑引擎（graphify-core `GraphOutput → DiGraph`
+      helper 允許性確認）
+- [ ] T2.2 `ImpactAlert` domain event struct + 生產邏輯
+- [ ] T2.3 graphify-mcp ImpactAlert → MCP notification 轉發
+      （跟 GraphifyRust 協商 trait v1.1 以選定 §8.3 方案）
+
+## 10. 對 graphify-core v1 契約驗證
 
 - `GraphifyPlugin` trait：`get_id` / `bind` / `get_workspace_key` /
   `sync_toon` / `on_graph_updated`（已驗證 graphify-core/src/plugin.rs）。
 - v1 不暴露 graph handle：plugin 透過 `sync_toon(Some(toon))` 收圖，
-  自行 `from_toon` 取得 GraphOutput。
-- `Node` 欄位：`id` / `label` / `source_file` / `start_line` / `end_line`
-  （types.rs）— line→symbol 解析由此可行。
+  自行 `from_toon` 取得 GraphOutput（from_toon 為 graphify-core root re-export）。
+- `Node` 欄位：`id` / `label` / `kind` / `source_file` / `start_line` /
+  `end_line`（types.rs）— line→symbol 解析可行。`doc_comment` / `description`
+  / `metadata` 為 cosmetic，不宜用於 signature_hash（§7.2）。
 - `query_bfs` / `find_shortest_path` 為 graphify-core 公開 primitive
-  （graph/query.rs、graph/path.rs）— Slice 2 衝擊半徑 BFS 可複用。
-- 無 line→node resolver API 存在於 core — resolver 由 plugin 自行實作
-  （對快取的 GraphOutput 線掃）。
+  （`graphify-core/src/graph/query.rs` / `path.rs`）— Slice 2 衝擊半徑 BFS
+  可複用前提為 plugin 能取到 DiGraph 或 graphify-core 暴露 GraphOutput→
+  DiGraph helper（待確認）。
+- `GraphUpdateEvent.modified_nodes` 為 `Vec<NodeId>` — Slice 2 種子來源。
+  Slice 1 不依賴此欄（採 node presence diff 路徑）。
 
-## 10. 已知限制 / [待討論]
+## 11. 已知限制 / [待討論]
 
-- CRG MCP 目前無 `search_reviews` / `resolve_review` 工具（probe 實測
-  僅 4 tools：query_graph_tool / detect_changes_tool / review_context_tool
-  / minimal_context_tool）— 真雙向銷案需 CRG 端開發（Slice 2 開規格）。
-- `include_impact_radius` 的 BFS 語意需與 graphify-core `query_bfs` 對齊。
-- ImpactAlert 的 graphify-mcp 轉發機制（Slice 2 時與 GraphifyRust 協商）。
+- CRG MCP 目前無 `search_reviews` / `resolve_review` 工具（probe 實測僅 4
+  tools：query_graph_tool / detect_changes_tool / review_context_tool /
+  minimal_context_tool）— Slice 2 雙向銷案需 CRG 端開發，T1.4 開規格書
+  （`crg-requirements.md` 進行中）。
+- `signature_hash` 比對 YAGNI 裁決（§7.2）— 需使用者確認後才砍 T1.1。
+- Slice 2 ImpactAlert 經 graphify-mcp 轉發的 trait 延伸需求（§8.3
+  方案選定）— 待 GraphifyRust 端 v1.1 協商。
+- `GraphOutput → DiGraph` helper 在 graphify-core 的公開程度
+ 未知 — 影響 T2.1 實作路徑（自寫轉換 vs 複用 core）。
+- `include_impact_radius` 在 `review_get_context` 的 MCP 參數語意需與
+  graphify-core `query_bfs` depth 參數對齊。
