@@ -16,11 +16,21 @@
 - **Line-to-Symbol Resolver**：將脆弱的 `file_path + line_number` 綁定為
   穩定的 canonical symbol（AST 重建或行號位移仍保持綁定）。
 - **review_bindings 表**：併入專案共用的 `graphify.db`，記錄評語狀態、
-  Severity 與綁定時節點的結構 hash（drift guard 用）。
+  Severity 與綁定時節點的結構 hash（drift guard 用，Slice 1 採 Node.id
+  presence diff，signature_hash 寫入固定預設值 `v1_default` — YAGNI 裁決）。
 - **MCP 自動註冊**：`review_ingest` / `review_get_context` /
   `review_resolve` 由 graphify-mcp 於啟動時自動註冊。
-- **Impact Guard**：`on_graph_updated` 偵測變動觸及 high/critical 未解決
-  點位時，產出 ImpactAlert domain event 交由 graphify-mcp 轉發。
+- **Drift Guard & Auto-Resolution（Slice 1）**：`on_graph_updated` 偵測
+  review 綁定的 canonical node 已不存在於最新 GraphOutput（rename / 移除 /
+  檔案消失）→ 自動標 `resolved` + `resolved_by='auto:node_gone'`，不需 CRG
+  端配合。graphify-mcp 在 `graphify_notify_plugins` 與 `graph_reindex`
+  後觸發；CLI 在每次 review 指令前 `feed_graph_and_drift` 觸發。
+- **review_resolve 完整化**：手動銷案接受 `resolved_by`（如 `manual`）與
+  `resolution_reason` 參數，寫入 `review_bindings` 的 `resolved_by` /
+  `resolution_reason` / `resolved_at` 欄位。
+- **Impact Guard（Slice 2，待 trait v1.1）**：`on_graph_updated` 偵測變動
+  觸及 high/critical 未解決點位時，產出 ImpactAlert domain event 經由
+  trait v1.1 notify callback closure 交由 graphify-mcp 轉發。
 
 ## 資料契約
 

@@ -26,7 +26,9 @@ pub struct ReviewBinding {
     pub canonical_node_id: String,
     pub file_path: String,
     pub line_number: i64,
-    /// 綁定時 AST 節點結構 hash（Slice 1 drift guard 用；Slice 0 存空字串）。
+    /// YAGNI 預留欄位（design §7.2，commit 級 YAGNI 裁決）：
+    /// 結構 hash 比對路徑已砍，一律寫入固定 sentinel `"v1_default"` — 保留
+    /// 欄位供未來 trait v1.1+ 暴露 AST handle 後回頭實作，不參與任何查詢。
     pub signature_hash: String,
     pub severity: String,
     pub category: String,
@@ -34,6 +36,14 @@ pub struct ReviewBinding {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Slice 1 schema v1.1 欄位：銷案原因。手動 `review_resolve` /
+    /// 自動 `auto:node_gone` 各自填上。
+    pub resolution_reason: String,
+    /// Slice 1 schema v1.1 欄位：resolved 時間戳（RFC 3339）。
+    pub resolved_at: String,
+    /// Slice 1 schema v1.1 欄位：銷案來源。`"manual"` / `"auto:node_gone"` /
+    /// 未來其他 `"auto:*"` 變體。
+    pub resolved_by: String,
 }
 
 impl ReviewBinding {
@@ -84,7 +94,35 @@ impl ReviewDb {
             CREATE INDEX IF NOT EXISTS idx_review_status
                 ON review_bindings (workspace_key, status);",
         )?;
+        // Slice 1 schema v1.1 migration：補三個新欄至舊 schema 的既有資料表。
+        // ALTER TABLE ADD COLUMN 在 SQLite 不會破壞既有資料列；舊列新欄回 NULL
+        // → 讀回時 row.get::<String>() 會失敗，故下方查詢一律用 COALESCE
+        // 把 NULL 轉為空字串。為了讓舊列也能拿到非空預設，這裡用
+        // `... DEFAULT ''`；新 INSERT 一律寫非空字串（upsert 簽名不變）。
+        Self::migrate_v1_1(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// Slice 1 schema v1.1 migration：補 `resolution_reason` /
+    /// `resolved_at` / `resolved_by` 三欄。idempotent — 欄位已存在時 ALTER
+    /// 會回 "duplicate column" 錯誤被靜默吞掉（rusqlite 不檢查字串訊息，
+    /// 故我們以 PRAGMA table_info 先檢查是否已存在再 ALTER）。
+    fn migrate_v1_1(conn: &Connection) -> Result<(), rusqlite::Error> {
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(review_bindings)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .collect();
+        for (col, ddl) in [
+            ("resolution_reason", "ALTER TABLE review_bindings ADD COLUMN resolution_reason TEXT NOT NULL DEFAULT ''"),
+            ("resolved_at",       "ALTER TABLE review_bindings ADD COLUMN resolved_at       TEXT NOT NULL DEFAULT ''"),
+            ("resolved_by",       "ALTER TABLE review_bindings ADD COLUMN resolved_by       TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !cols.iter().any(|c| c == col) {
+                conn.execute_batch(ddl)?;
+            }
+        }
+        Ok(())
     }
 
     /// 插入或覆寫一筆綁定（以 review_id 為鍵）。已存在則更新除
@@ -97,18 +135,24 @@ impl ReviewDb {
             "INSERT INTO review_bindings
                 (workspace_key, id, canonical_node_id, file_path, line_number,
                  signature_hash, severity, category, comment, status,
-                 created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 created_at, updated_at, resolution_reason, resolved_at, resolved_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(workspace_key, id) DO UPDATE SET
-                canonical_node_id = excluded.canonical_node_id,
-                file_path         = excluded.file_path,
-                line_number       = excluded.line_number,
-                signature_hash    = excluded.signature_hash,
-                severity          = excluded.severity,
-                category          = excluded.category,
-                comment           = excluded.comment,
-                status            = excluded.status,
-                updated_at        = excluded.updated_at",
+                canonical_node_id  = excluded.canonical_node_id,
+                file_path          = excluded.file_path,
+                line_number        = excluded.line_number,
+                signature_hash     = excluded.signature_hash,
+                severity           = excluded.severity,
+                category           = excluded.category,
+                comment            = excluded.comment,
+                status             = excluded.status,
+                updated_at         = excluded.updated_at,
+                resolution_reason  = COALESCE(NULLIF(excluded.resolution_reason, ''),
+                                               review_bindings.resolution_reason),
+                resolved_at        = COALESCE(NULLIF(excluded.resolved_at, ''),
+                                               review_bindings.resolved_at),
+                resolved_by        = COALESCE(NULLIF(excluded.resolved_by, ''),
+                                               review_bindings.resolved_by)",
             rusqlite::params![
                 b.workspace_key,
                 b.id,
@@ -122,6 +166,9 @@ impl ReviewDb {
                 b.status,
                 b.created_at,
                 b.updated_at,
+                b.resolution_reason,
+                b.resolved_at,
+                b.resolved_by,
             ],
         )?;
         Ok(())
@@ -139,7 +186,10 @@ impl ReviewDb {
         let mut stmt = self.conn.prepare(
             "SELECT workspace_key, id, canonical_node_id, file_path, line_number,
                     signature_hash, severity, category, comment, status,
-                    created_at, updated_at
+                    created_at, updated_at,
+                    COALESCE(resolution_reason, '') AS resolution_reason,
+                    COALESCE(resolved_at, '')       AS resolved_at,
+                    COALESCE(resolved_by, '')       AS resolved_by
              FROM review_bindings
              WHERE workspace_key = ?1 AND canonical_node_id = ?2
              ORDER BY created_at DESC",
@@ -160,13 +210,42 @@ impl ReviewDb {
         let mut stmt = self.conn.prepare(
             "SELECT workspace_key, id, canonical_node_id, file_path, line_number,
                     signature_hash, severity, category, comment, status,
-                    created_at, updated_at
+                    created_at, updated_at,
+                    COALESCE(resolution_reason, '') AS resolution_reason,
+                    COALESCE(resolved_at, '')       AS resolved_at,
+                    COALESCE(resolved_by, '')       AS resolved_by
              FROM review_bindings
              WHERE workspace_key = ?1 AND canonical_node_id = ?2
                AND status = 'unresolved'
              ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([workspace_key, node_id], row_from_sql)?;
+        rows.collect()
+    }
+
+    /// 列出一 workspace中所有非 orphan 的未解決綁定（Slice 1 on_graph_updated
+    /// presence-diff 用）— 排除 `canonical_node_id = ''` 的 orphan 列。
+    ///
+    /// # Errors
+    /// SQLite 查詢失敗時回傳 `rusqlite::Error`。
+    pub fn list_unresolved_non_orphan(
+        &self,
+        workspace_key: &str,
+    ) -> Result<Vec<ReviewBinding>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT workspace_key, id, canonical_node_id, file_path, line_number,
+                    signature_hash, severity, category, comment, status,
+                    created_at, updated_at,
+                    COALESCE(resolution_reason, '') AS resolution_reason,
+                    COALESCE(resolved_at, '')       AS resolved_at,
+                    COALESCE(resolved_by, '')       AS resolved_by
+             FROM review_bindings
+             WHERE workspace_key = ?1
+               AND status = 'unresolved'
+               AND canonical_node_id <> ''
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([workspace_key], row_from_sql)?;
         rows.collect()
     }
 
@@ -179,12 +258,26 @@ impl ReviewDb {
         workspace_key: &str,
         review_id: &str,
         updated_at: &str,
+        resolved_by: &str,
+        resolution_reason: &str,
+        resolved_at: &str,
     ) -> Result<usize, rusqlite::Error> {
         self.conn.execute(
             "UPDATE review_bindings
-             SET status = 'resolved', updated_at = ?3
+             SET status = 'resolved',
+                 updated_at = ?3,
+                 resolved_by = ?4,
+                 resolution_reason = ?5,
+                 resolved_at = ?6
              WHERE workspace_key = ?1 AND id = ?2",
-            rusqlite::params![workspace_key, review_id, updated_at],
+            rusqlite::params![
+                workspace_key,
+                review_id,
+                updated_at,
+                resolved_by,
+                resolution_reason,
+                resolved_at,
+            ],
         )
     }
 
@@ -230,7 +323,10 @@ impl ReviewDb {
             .query_row(
                 "SELECT workspace_key, id, canonical_node_id, file_path, line_number,
                         signature_hash, severity, category, comment, status,
-                        created_at, updated_at
+                        created_at, updated_at,
+                        COALESCE(resolution_reason, '') AS resolution_reason,
+                        COALESCE(resolved_at, '')       AS resolved_at,
+                        COALESCE(resolved_by, '')       AS resolved_by
                  FROM review_bindings
                  WHERE workspace_key = ?1 AND id = ?2",
                 rusqlite::params![workspace_key, review_id],
@@ -254,6 +350,11 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewBinding> {
         status: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        // Slice 1 schema v1.1 新欄：COALESCE 在 SELECT 端已把 NULL（舊資料
+        // 未寫過這欄）轉為空字串，直接 get::<String> 即可)
+        resolution_reason: row.get(12)?,
+        resolved_at: row.get(13)?,
+        resolved_by: row.get(14)?,
     })
 }
 
@@ -268,13 +369,16 @@ mod tests {
             canonical_node_id: node.to_string(),
             file_path: "src/auth.rs".to_string(),
             line_number: 42,
-            signature_hash: String::new(),
+            signature_hash: "v1_default".to_string(),
             severity: "high".to_string(),
             category: "security".to_string(),
             comment: "timing attack".to_string(),
             status: "unresolved".to_string(),
             created_at: "2026-08-10T00:00:00Z".to_string(),
             updated_at: "2026-08-10T00:00:00Z".to_string(),
+            resolution_reason: String::new(),
+            resolved_at: String::new(),
+            resolved_by: String::new(),
         }
     }
 
@@ -336,17 +440,65 @@ mod tests {
         let un = db.query_unresolved_by_node("w-1", "n").unwrap();
         assert_eq!(un.len(), 0, "dismissed is not unresolved");
 
-        let n = db.resolve("w-1", "crg-1", "2026-08-11T00:00:00Z").unwrap();
+        let n = db
+            .resolve("w-1", "crg-1", "2026-08-11T00:00:00Z", "manual", "reviewed & fixed", "2026-08-11T00:00:00Z")
+            .unwrap();
         assert_eq!(n, 1);
         let row = db.get("w-1", "crg-1").unwrap().unwrap();
         assert_eq!(row.status, "resolved");
         assert_eq!(row.updated_at, "2026-08-11T00:00:00Z");
+        assert_eq!(row.resolved_by, "manual");
+        assert_eq!(row.resolution_reason, "reviewed & fixed");
+        assert_eq!(row.resolved_at, "2026-08-11T00:00:00Z");
     }
 
     #[test]
     fn resolve_unknown_id_returns_zero() {
         let (_d, db) = open_tmp();
-        let n = db.resolve("w-1", "nope", "now").unwrap();
+        let n = db
+            .resolve("w-1", "nope", "now", "manual", "", "now")
+            .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn migration_v1_1_is_idempotent_and_preserves_rows() {
+        // 模擬 Slice 0 schema（無三個新欄）：先建舊版資料表 → 塞一筆 →
+        // ReviewDb::open 應補欄且資料保留、新欄回空字串。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graphify.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE review_bindings (
+                workspace_key     TEXT NOT NULL,
+                id                TEXT NOT NULL,
+                canonical_node_id TEXT NOT NULL,
+                file_path         TEXT NOT NULL,
+                line_number       INTEGER NOT NULL,
+                signature_hash    TEXT NOT NULL,
+                severity          TEXT NOT NULL,
+                category          TEXT NOT NULL,
+                comment           TEXT NOT NULL,
+                status            TEXT NOT NULL DEFAULT 'unresolved',
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL,
+                PRIMARY KEY (workspace_key, id)
+            );
+            INSERT INTO review_bindings VALUES
+              ('w-1','crg-old','n','src/a.rs',1,'','high','sec','c','unresolved',
+               '2026-08-10T00:00:00Z','2026-08-10T00:00:00Z');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = ReviewDb::open(&path).unwrap();
+        let row = db.get("w-1", "crg-old").unwrap().unwrap();
+        assert_eq!(row.status, "unresolved");
+        assert_eq!(row.resolution_reason, "", "old rows get empty reason after migration");
+        assert_eq!(row.resolved_by, "");
+
+        // 再開一次 → idempotent（migration 不炸、資料仍在）
+        let db2 = ReviewDb::open(&path).unwrap();
+        assert_eq!(db2.count("w-1").unwrap(), 1);
     }
 }

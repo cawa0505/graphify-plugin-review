@@ -199,10 +199,10 @@ GraphOutput 快取。Auto-resolver 只需做：
    compare」不會因內部重構而失效）。標 `drifted` 待人工與直接靜默不動
    幾乎沒區別。
 
-**Ponytail 提案**：Slice 1 砍 `signature_hash` 的「比對實作」task，僅保留欄
-位（schema 已 ready，無成本）。Node 消失即自動銷案，足以覆蓋 99% 漂移
-場景。真如有 rename + body-preserving + review 該轉移的個案需求浮現
-再回頭加。 **[待使用者裁決]**
+**[已裁決 — YAGNI 砍比對實作]**：Slice 1 砍 `signature_hash` 的「比對實作」，
+僅保留欄位（schema 已 ready，無成本），寫入固定預設值 `v1_default`。
+Node 消失即自動銷案（`resolved_by='auto:node_gone'`），覆蓋 99% 漂移場景。
+真如有 rename + body-preserving + review 該轉移的個案需求浮現再回頭加。
 
 ### 7.3 review_resolve 完整化
 
@@ -217,11 +217,10 @@ GraphOutput 快取。Auto-resolver 只需做：
 
 ### 7.4 驗收準則（Slice 1）
 
-- [ ] `on_graph_updated` 實作：給定 fixture {binding_to_node_A, unrelated_node_B_to_review} → 將 A 自 graph 移除後 sync_toon + on_graph_updated → A 的 binding 自動 resolved，unrelated 仍 unresolved。
-- [ ] schema migration 不破壞已 shipped bindings（`ALTER TABLE … ADD COLUMN resolution_reason` 在舊 schema 上存在資料時可用）。
-- [ ] 不引入任何網路依賴（`: ureq` 不被 Slice 1 強制）。
-- [ ] graphify-mcp 3 tool 行為與 Slice 0 完全 binary-兼容；新增 `resolved_by`
-      欄位在 response 內是 optional 且對舊 client 透明。
+- [x] `on_graph_updated` 實作：給定 fixture {binding_to_node_A, unrelated_node_B_to_review} → 將 A 自 graph 移除後 sync_toon + on_graph_updated → A 的 binding 自動 resolved（`auto:node_gone`），unrelated 仍 unresolved。**e2e 驗證通過**（CLI fixture：r-101 auto-resolve ✓ / r-102 保持 unresolved ✓）。
+- [x] schema migration 不破壞已 shipped bindings（`migrate_v1_1` 用 `PRAGMA table_info` 檢查後 `ALTER TABLE`，舊 schema 上存在資料時可用；migration idempotency 測試通過）。
+- [x] 不引入任何網路依賴（Slice 1 無新 dep；`ureq` 仍為 Slice 0 的 crg_client 骨架，預設 NoOp）。
+- [x] graphify-mcp 3 tool 行為與 Slice 0 binary-兼容；`resolved_by` / `resolution_reason` 欄位在 response 內 optional，舊 client 透明。
 
 ## 8. Slice 2 — Real-time Impact Guard（本批細部規格）
 
@@ -234,9 +233,11 @@ GraphOutput 快取。Auto-resolver 只需做：
   `detect_changes_tool` 預設對齊）走逆向邊（往 upstream callers）。
 - 注意：現在 plugin 持有 `GraphOutput`（plain nodes/edges Vec）並非 `DiGraph`
   — 必須 `GraphOutput → DiGraph` 轉換 + `find_shortest_path` /
-  query_bfs。**graphify-core 需要公開一個 `GraphOutput → DiGraph` 的
-  helper**，否則 plugin 自寫轉換重現 core 邏輯（YAGNI 風險）。
-  **[待 graphify-core API 確認]**
+  query_bfs。**[探勘已完成]** graphify-core **無**公開 `GraphOutput → DiGraph`
+  helper，但 `graphify_core::DiGraph`（petgraph re-export，`lib.rs:25`）為公開
+  型別。T2.1 在 plugin 端自寫 `build_impact_graph(&GraphOutput) -> DiGraph<Node, Edge>`
+  （~30-50 行），不需新依賴、不需 core 改動。`query_bfs` /
+  `find_shortest_path` 入參為 `&DiGraph<Node, Edge>`，自建 DiGraph 即可直接呼叫。
 
 ### 8.2 Impact Alert 判定與狀態
 
@@ -336,8 +337,8 @@ host-side API。供選方案（待 GraphifyRust 協商）:
   / `metadata` 為 cosmetic，不宜用於 signature_hash（§7.2）。
 - `query_bfs` / `find_shortest_path` 為 graphify-core 公開 primitive
   （`graphify-core/src/graph/query.rs` / `path.rs`）— Slice 2 衝擊半徑 BFS
-  可複用前提為 plugin 能取到 DiGraph 或 graphify-core 暴露 GraphOutput→
-  DiGraph helper（待確認）。
+  採 plugin 端自建 `DiGraph<Node, Edge>`（`graphify_core::DiGraph` re-export）
+  路徑， graphify-core 無 GraphOutput→DiGraph helper。
 - `GraphUpdateEvent.modified_nodes` 為 `Vec<NodeId>` — Slice 2 種子來源。
   Slice 1 不依賴此欄（採 node presence diff 路徑）。
 
@@ -347,10 +348,15 @@ host-side API。供選方案（待 GraphifyRust 協商）:
   tools：query_graph_tool / detect_changes_tool / review_context_tool /
   minimal_context_tool）— Slice 2 雙向銷案需 CRG 端開發，T1.4 開規格書
   （`crg-requirements.md` 進行中）。
-- `signature_hash` 比對 YAGNI 裁決（§7.2）— 需使用者確認後才砍 T1.1。
+- `signature_hash` 比對 YAGNI 裁決（§7.2）— **已裁決砍比對實作**，
+  schema 欄保留寫入 `v1_default`，Slice 1 採 Node.id presence diff。
 - Slice 2 ImpactAlert 經 graphify-mcp 轉發的 trait 延伸需求（§8.3
-  方案選定）— 待 GraphifyRust 端 v1.1 協商。
+  方案選定）— **已裁決方案 A**（trait v1.1 注入 notify callback
+  closure）；Slice 1 驗收通過後再協商 GraphifyRust 端 v1.1 延伸與開工
+  Slice 2。
 - `GraphOutput → DiGraph` helper 在 graphify-core 的公開程度
- 未知 — 影響 T2.1 實作路徑（自寫轉換 vs 複用 core）。
+  — **已探勘**：graphify-core 無公開 helper；plugin 端自寫
+  `build_impact_graph`（~30-50 行），複用 `graphify_core::DiGraph`
+  re-export，不需新增依賴。
 - `include_impact_radius` 在 `review_get_context` 的 MCP 參數語意需與
   graphify-core `query_bfs` depth 參數對齊。

@@ -35,29 +35,31 @@
       binding 2 + orphan 1 → get-context 命中 → resolve 翻狀態 → 再查為空）
       — plugin c344dc4 + 69fa8bb；GraphifyRust 424cd72
 
-## Slice 1 — Drift Guard & Auto-Resolution（雙向銷案與漂移防禦）
+## Slice 1 — Drift Guard & Auto-Resolution（雙向銷案與漂移防禦）— ✅ SHIPPED
 
 > 細部 spec：design.md §7。CRG 端 RFC：`crg-requirements.md`。
 
-- [ ] **T1.1 Signature Hash 範圍裁決**：實作 YAGNI 砍法（保留 schema
-      欄但無比對路徑）；schema migration `ALTER TABLE review_bindings
-      ADD COLUMN resolution_reason TEXT DEFAULT ''
-      , ADD COLUMN resolved_at TEXT DEFAULT ''
-      , ADD COLUMN resolved_by TEXT DEFAULT ''`
-      — **[待使用者裁決 §7.2]**
-- [ ] **T1.2 on_graph_updated Auto-Resolver**：對 workspace 內所有
+- [x] **T1.1 Signature Hash 範圍裁決**：實作 YAGNI 砍法 — schema migration
+      `ALTER TABLE review_bindings ADD COLUMN resolution_reason TEXT DEFAULT ''`
+      `, ADD COLUMN resolved_at TEXT DEFAULT ''`
+      `, ADD COLUMN resolved_by TEXT DEFAULT ''`，
+      `signature_hash` 寫入固定預設值 `v1_default`（無比對路徑）。
+- [x] **T1.2 on_graph_updated Auto-Resolver**：對 workspace 內所有
       `status='unresolved' AND canonical_node_id != ''` 的 binding，檢查
       canonical_node_id 是否還存在於當前快取 GraphOutput 的節點集 — 不存在
       → 自動標 `resolved` + `resolved_by='auto:node_gone'` +
-      `resolved_at=now()` + `resolution_reason` 留 plugin 預設值。
-- [ ] **T1.3 review_resolve 工具完整化**：`review_resolve` /
+      `resolved_at=now()` + `resolution_reason='canonical node no longer
+      present in graph (renamed, moved, or removed)'`。graphify-mcp 在
+      `graphify_notify_plugins` 與 `graph_reindex` 後觸發；CLI 在每次
+      review 指令前 `feed_graph_and_drift` 觸發。
+- [x] **T1.3 review_resolve 工具完整化**：`review_resolve` /
       `reviewResolve` 接受新 `resolved_by` 與 `resolution_reason` 參數
       （手動 path）；本地 graphify.db 更新 + 回應中含完整狀態。CRG 端
-      反向銷案走 `crg_client.resolve_review` — 此部分 **不阻塞 T1.2**，
-      local 銷案在 CRG API 到位前可獨立 ship。
-- [ ] **T1.4 CRG RFC 交付**：本文 `crg-requirements.md` 開出
+      反向銷案走 `crg_client.resolve_review` — 不阻塞 T1.2，
+      local 銷案在 CRG API 到位前可獨立 ship（CRG RFC T1.4 已交付）。
+- [x] **T1.4 CRG RFC 交付**：本文 `crg-requirements.md` 開出
       `search_reviews` / `resolve_review` 規格；提交給 CRG 端等待排程
-      （graphify 端不依賴 R1/R2 已上線，純交付）。
+      （graphify 端不依賴 R1/R2 已上線，純交付）
 
 ## Slice 2 — Real-time Impact Guard（雙向主動衝擊防禦）
 

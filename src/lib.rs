@@ -165,13 +165,16 @@ impl ReviewPlugin {
                 canonical_node_id: canonical,
                 file_path: review.file_path.clone(),
                 line_number: i64::from(review.line_number),
-                signature_hash: String::new(), // Slice 1
+                signature_hash: "v1_default".to_string(), // YAGNI sentinel（design §7.2）
                 severity: review.severity.clone(),
                 category: review.category.clone(),
                 comment: review.comment.clone(),
                 status: "unresolved".to_string(),
                 created_at: review.created_at.clone(),
                 updated_at: now.clone(),
+                resolution_reason: String::new(),
+                resolved_at: String::new(),
+                resolved_by: String::new(),
             })?;
         }
         Ok((bound, orphan))
@@ -198,16 +201,29 @@ impl ReviewPlugin {
     /// `review_resolve`：將指定 review_id 標記為 resolved。回傳 `true` =
     /// 已更新；`false` = review_id 不存在。
     ///
+    /// `resolved_by` 標記銷案來源（`"manual"`；自動路徑由 plugin 內部以
+    /// `"auto:node_gone"` 寫入，不走此 API）。`resolution_reason` 記錄原因
+    /// （手動路徑可空字串）。
+    ///
     /// # Errors
     /// db 寫入失敗回傳 [`rusqlite::Error`]。
     pub fn review_resolve(
         &self,
         workspace_key: &str,
         review_id: &str,
+        resolved_by: &str,
+        resolution_reason: &str,
     ) -> Result<bool, rusqlite::Error> {
         let db = self.db()?;
         let now = crate::sync::now_rfc3339();
-        Ok(db.resolve(workspace_key, review_id, &now)? > 0)
+        Ok(db.resolve(
+            workspace_key,
+            review_id,
+            &now,
+            resolved_by,
+            resolution_reason,
+            &now,
+        )? > 0)
     }
 }
 
@@ -255,8 +271,41 @@ impl GraphifyPlugin for ReviewPlugin {
     }
 
     fn on_graph_updated(&mut self, _event: &GraphUpdateEvent) {
-        // Slice 2：impact guard（BFS 衝擊半徑 + impact_alert domain event）。
-        // 目前為 no-op；core 預設實作亦為 no-op，符合 v1 相容。
+        // Slice 1：drift auto-resolver — presence diff。
+        //
+        // 裁決（design §7.2）：不做 signature_hash 比對（v1 trait 無 AST handle，
+        // 且任何「結構變」都會改變 Node.id）。判定唯一依據 = canonical_node_id
+        // 是否仍存在於最新快取 GraphOutput 的 node 集合中：
+        //   - 節點消失（改名 / 檔案移動 / 刪除）→ Node.id 不再存在 → 自動銷案。
+        //   - 節點仍在 → review 仍適用 → 維持 unresolved（不誤殺重構）。
+        //
+        // orphan 綁定（canonical_node_id 為空）不在此判定範圍（本來就沒綁定
+        // 節點；由 review_resolve 手動處理）。此方法為 best-effort：任何
+        // 失敗都靜默跳過（v1 契約：plugin 永不 panic）。
+        let Some(graph) = self.graph() else { return };
+        let live_ids: std::collections::HashSet<&str> =
+            graph.nodes.iter().map(|n| n.id.0.as_str()).collect();
+        let db = match self.db() {
+            Ok(db) => db,
+            Err(_) => return,
+        };
+        let bindings = match db.list_unresolved_non_orphan(&self.workspace_key) {
+            Ok(rows) => rows,
+            Err(_) => return,
+        };
+        let now = crate::sync::now_rfc3339();
+        for binding in &bindings {
+            if !live_ids.contains(binding.canonical_node_id.as_str()) {
+                let _ = db.resolve(
+                    &self.workspace_key,
+                    &binding.id,
+                    &now,
+                    "auto:node_gone",
+                    "canonical node no longer present in graph (renamed, moved, or removed)",
+                    &now,
+                );
+            }
+        }
     }
 }
 
@@ -413,11 +462,124 @@ mod tests {
         };
         p.review_ingest(&payload).unwrap();
 
-        assert!(p.review_resolve("w-1", "crg-003").unwrap());
-        assert!(!p.review_resolve("w-1", "nope").unwrap());
+        assert!(p
+            .review_resolve("w-1", "crg-003", "manual", "")
+            .unwrap());
+        assert!(!p.review_resolve("w-1", "nope", "manual", "").unwrap());
 
         let (_, rows) = p.review_get_context("w-1", "", true).unwrap();
         assert_eq!(rows.len(), 0, "resolved reviews no longer surface as unresolved");
+    }
+
+    fn node_graph(node_id: &str) -> GraphOutput {
+        GraphOutput {
+            nodes: vec![graphify_core::Node {
+                id: graphify_core::NodeId(node_id.to_string()),
+                label: node_id.rsplit(':').next().unwrap_or("n").to_string(),
+                file_type: graphify_core::FileType::Code,
+                kind: "function".to_string(),
+                language: "rust".to_string(),
+                source_file: node_id
+                    .rsplitn(3, ':')
+                    .nth(2)
+                    .unwrap_or("src/auth.rs")
+                    .to_string(),
+                start_line: 1,
+                end_line: 50,
+                doc_comment: None,
+                description: None,
+                metadata: None,
+            }],
+            edges: Vec::new(),
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn on_graph_updated_auto_resolves_drifted_node() {
+        let (_d, p) = plugin_with_tmp_db();
+        let mut p = p;
+        p.bind(WorkspaceContext::new("w-1", "ws", "/tmp/ws"));
+
+        // 圖 v1：verify_token 存在 → ingest 綁定成功（1 bound / 0 orphan）
+        let toon = graphify_core::to_toon(&node_graph("src/auth.rs:function:verify_token"));
+        p.sync_toon(Some(toon.into_bytes()));
+        let payload = IngestPayload {
+            version: "1.0".to_string(),
+            source: "code-review-graph".to_string(),
+            workspace_key: "w-1".to_string(),
+            reviews: vec![crate::ingest::ReviewItem {
+                review_id: "crg-drift-001".to_string(),
+                file_path: "src/auth.rs".to_string(),
+                line_number: 42,
+                severity: "high".to_string(),
+                category: "security".to_string(),
+                comment: "timing attack".to_string(),
+                created_at: "2026-08-10T00:00:00Z".to_string(),
+            }],
+        };
+        let (bound, orphan) = p.review_ingest(&payload).unwrap();
+        assert_eq!((bound, orphan), (1, 0));
+
+        // 圖 v2：節點改名（函數 rename）→ 舊 Node.id 消失
+        let toon2 =
+            graphify_core::to_toon(&node_graph("src/auth.rs:function:verify_authentication_token"));
+        p.sync_toon(Some(toon2.into_bytes()));
+
+        // on_graph_updated → presence diff → 自動銷案
+        let event = graphify_core::GraphUpdateEvent::new(
+            "w-1",
+            Vec::new(),
+            graphify_core::GraphUpdateKind::Indexed,
+        );
+        p.on_graph_updated(&event);
+
+        let (_, rows) = p
+            .review_get_context("w-1", "src/auth.rs:function:verify_token", true)
+            .unwrap();
+        assert!(rows.is_empty(), "drifted binding auto-resolved");
+        let (_, orphan_rows) = p.review_get_context("w-1", "", true).unwrap();
+        assert!(orphan_rows.is_empty(), "no orphan leakage from auto-resolve");
+    }
+
+    #[test]
+    fn on_graph_updated_keeps_present_node_unresolved() {
+        let (_d, p) = plugin_with_tmp_db();
+        let mut p = p;
+        p.bind(WorkspaceContext::new("w-1", "ws", "/tmp/ws"));
+
+        let toon = graphify_core::to_toon(&node_graph("src/auth.rs:function:verify_token"));
+        p.sync_toon(Some(toon.into_bytes()));
+        let payload = IngestPayload {
+            version: "1.0".to_string(),
+            source: "code-review-graph".to_string(),
+            workspace_key: "w-1".to_string(),
+            reviews: vec![crate::ingest::ReviewItem {
+                review_id: "crg-keep-001".to_string(),
+                file_path: "src/auth.rs".to_string(),
+                line_number: 42,
+                severity: "medium".to_string(),
+                category: "correctness".to_string(),
+                comment: "edge case".to_string(),
+                created_at: "2026-08-10T00:00:00Z".to_string(),
+            }],
+        };
+        p.review_ingest(&payload).unwrap();
+
+        // 同一張圖再更新 → 節點仍在 → 不誤殺
+        let toon2 = graphify_core::to_toon(&node_graph("src/auth.rs:function:verify_token"));
+        p.sync_toon(Some(toon2.into_bytes()));
+        let event = graphify_core::GraphUpdateEvent::new(
+            "w-1",
+            Vec::new(),
+            graphify_core::GraphUpdateKind::Indexed,
+        );
+        p.on_graph_updated(&event);
+
+        let (_, rows) = p
+            .review_get_context("w-1", "src/auth.rs:function:verify_token", true)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "present node stays unresolved");
     }
 
     #[test]
