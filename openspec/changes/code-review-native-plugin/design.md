@@ -209,11 +209,10 @@ Node 消失即自動銷案（`resolved_by='auto:node_gone'`），覆蓋 99% 漂�
 - Slice 0 已交付手動 `review_resolve`（CLI / MCP 都打通）。
 - Slice 1 補上 local DB 內 `resolution_reason` 欄（schema 變更：
   `ALTER TABLE … ADD COLUMN resolution_reason TEXT`）+ `resolved_at`。
-- **CRG 端反向銷案（`crg_client.resolve_review`）與 v1 host 解耦**：
-  本 plugin 自動銷案的訊號只在本 plugin 的 graphify.db 內變更；
-  CRG 端要同步銷，需 CRG 真有開出 `resolve_review` MCP 工具（見 §9
-  CRG RFC）。Slice 1 不阻塞 — 即便 CRG 端沒接，plugin 那邊也呈現 resolved
-  狀態，Agent 查詢就收得到「已處理」訊號。
+- **CRG 端反向銷案 — 已裁決廢除**：probe 實測 CRG 無 review 狀態 store，
+  不存在 `resolve_review` 可呼叫。review 狀態的 source of truth 是本 plugin
+  的 graphify.db；自動銷案信號只在本 DB 內變更（見 §9 CRG Bridge 規格）。
+  Slice 1 不阻塞 — Agent 查詢即收得到「已處理」訊號。
 
 ### 7.4 驗收準則（Slice 1）
 
@@ -344,8 +343,8 @@ host-side API。原供選方案：
 - [x] T1.2 `on_graph_updated` auto-resolver：node 消失 → resolved
 - [x] T1.3 `review_resolve` 加 `resolution_reason` 與 `resolved_by`
       欄位回填
-- [x] T1.4 CRG RFC：`search_reviews` / `resolve_review` 需求規格書
-      開出（見 `crg-requirements.md`）
+- [x] T1.4 CRG Bridge 規格定案：probe 實測 CRG 現役 4 tools
+      （無 review store，R1/R2 廢除），對接契約見 `crg-requirements.md`
 
 ### Slice 2 — Real-time Impact Guard（shipped）
 
@@ -376,10 +375,13 @@ host-side API。原供選方案：
 
 ## 11. 已知限制 / [待討論]
 
-- CRG MCP 目前無 `search_reviews` / `resolve_review` 工具（probe 實測僅 4
-  tools：query_graph_tool / detect_changes_tool / review_context_tool /
-  minimal_context_tool）— Slice 2 雙向銷案需 CRG 端開發，T1.4 開規格書
-  （`crg-requirements.md` 進行中）。
+- **CRG bridge 對接（已定案）**：probe 實測 CRG MCP-over-HTTP 運行中，
+  endpoint 由 `CRG_BASE_URL` env 提供（預設 `http://127.0.0.1:8080/mcp`），
+  現役 4 tools（get_minimal_context_tool /
+  query_graph_tool / get_review_context_tool / detect_changes_tool）。
+  早期假設 CRG 需新增 `search_reviews` / `resolve_review`（R1/R2）
+  已**廢除** — CRG 無 review 狀態 store，review 狀態以 graphify.db
+  `review_bindings` 為 source of truth（`crg-requirements.md` §1/§6）。
 - `signature_hash` 比對 YAGNI 裁決（§7.2）— **已裁決砍比對實作**，
   schema 欄保留寫入 `v1_default`，Slice 1 採 Node.id presence diff。
 - Slice 2 ImpactAlert 經 graphify-mcp 轉發的 trait 延伸需求（§8.3

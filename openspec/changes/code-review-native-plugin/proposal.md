@@ -42,10 +42,14 @@ Core AST 圖譜 **0ms 升維對齊**至 canonical symbol（Symbol Path，如
   分析工具的調用骨架（對接 CRG 現有 4 tools）。
 - Slice 0 預留介面，不阻擋主路徑。
 
-### 選項 C — CRG 規格提案（Slice 1/2）
+### 選項 C — CRG Bridge 對接契約（定案，2026-08-10 實測後修正）
 
-- `search_reviews` / `resolve_review` 整理為 CRG RFC / Feature Request
-  開出，等待外部 CRG 社群或下一階段疊代 — 完全不阻擋當前進度。
+- ~~`search_reviews` / `resolve_review` 整理為 CRG RFC / Feature Request~~ —
+  **已廢除**：probe 實測 CRG 無 review 狀態 store，不存在可新增的
+  銷案 / 搜尋語意。
+- 改為純 bridge：plugin 以 MCP-over-HTTP 呼叫 CRG 現役 4 tools
+  （`get_review_context_tool` / `detect_changes_tool` 為 review 點位主來源），
+  對接契約見 `crg-requirements.md` — 不阻擋當前進度。
 
 ## Key Decisions（裁決紀錄）
 
@@ -97,9 +101,9 @@ Core AST 圖譜 **0ms 升維對齊**至 canonical symbol（Symbol Path，如
 - [ ] 永不 panic：BFS 失敗（如 GraphOutput 空白）只 log + Err，
       與 Slice 0 「plugin 永不 panic」契約一致
 
-### CRG RFC（T1.4，純文件交付）
+### CRG Bridge 契約（T1.4，已定案）
 
-- [ ] `crg-requirements.md` 開出 CRG 端需新增的 MCP 工具需求：
-      `search_reviews`（含 query schema、回應結構）與
-      `resolve_review`（含 idempotency 語意），**不**修改 CRG 端現有 4
-      個工具之 schema（向後相容）
+- [x] `crg-requirements.md` 定案為純 bridge 對接契約 — probe 實測 CRG
+      現役 4 tools（MCP-over-HTTP），~~`search_reviews` / `resolve_review`~~
+      廢除（CRG 無 review 狀態 store）；review 狀態以 graphify.db
+      `review_bindings` 為 source of truth

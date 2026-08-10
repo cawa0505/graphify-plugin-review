@@ -55,11 +55,12 @@
 - [x] **T1.3 review_resolve 工具完整化**：`review_resolve` /
       `reviewResolve` 接受新 `resolved_by` 與 `resolution_reason` 參數
       （手動 path）；本地 graphify.db 更新 + 回應中含完整狀態。CRG 端
-      反向銷案走 `crg_client.resolve_review` — 不阻塞 T1.2，
-      local 銷案在 CRG API 到位前可獨立 ship（CRG RFC T1.4 已交付）。
-- [x] **T1.4 CRG RFC 交付**：本文 `crg-requirements.md` 開出
-      `search_reviews` / `resolve_review` 規格；提交給 CRG 端等待排程
-      （graphify 端不依賴 R1/R2 已上線，純交付）
+      反向銷案**已裁決廢除**（CRG 無 review 狀態 store，見
+      `crg-requirements.md` §1/§6）— 不阻塞 T1.2，local 銷案可獨立 ship。
+- [x] **T1.4 CRG Bridge 規格定案**：`crg-requirements.md` 改寫為純
+      bridge 對接契約 — probe 實測 CRG 現役 4 tools（MCP-over-HTTP，
+      endpoint 由 `CRG_BASE_URL` env 提供），R1 `search_reviews` / R2
+      `resolve_review` 廢除；review 狀態以 graphify.db 為 source of truth。
 
 ## Slice 2 — Real-time Impact Guard（雙向主動衝擊防禦）
 
