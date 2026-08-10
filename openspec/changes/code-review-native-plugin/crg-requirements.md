@@ -43,8 +43,10 @@ MCP server probe 後**修正**：
 - framing 已 shipped（Slice 0，198 行）：`initialize_request` /
   `call_tool_request` / `extract_result_content`（剝 SSE 前綴）/
   `call_tool`（POST + Mcp-Session-Id + timeout 10s）。
-- **待補（實測段）**：`initialize()` 真呼叫（POST + 快取 session id），
-  使 `call_tool` 不再回 `NotInitialized`。
+- **已 shipped（CRG bridge 實測段）**：`initialize()` 真呼叫（POST +
+  快取 session id）已實作並對實機 daemon 驗證；`detect_changes()`
+  包裝 `detect_changes_tool`（`detail_level: "standard"` — `"minimal"` 只回
+  name strings，無法產出 file:line 點位，實測確認後改用 standard 拿完整 node dict）。
 - 錯誤處理：CRG 不可達 / 無效回應 → `CrgError`，plugin 端 **graceful 退避**
   （不阻塞 ingest 主路徑；對齊 OD RestBackend 的 NoOp 預設模式）。
 
@@ -55,11 +57,13 @@ MCP server probe 後**修正**：
 | `get_minimal_context_tool` | 開場快速判斷（風險級別、下一步） | `{ "repo_root", "task" }` | 不直接產 review 點位；作 context 輔助 |
 | `query_graph_tool` | BFS 衝擊的交叉驗證（可選） | `{ "repo_root", "pattern", "target" }` | 不直接產 review 點位；作驗證 |
 | `get_review_context_tool` | **主來源**：受影響節點 + 審查建議 | `{ "repo_root", "changed_files", "detail_level" }` | `key_entities` / `summary` 內含的變更節點 → file:line |
-| `detect_changes_tool` | **主來源**：git diff 風險審查 | `{ "repo_root", "base", "include_source" }` | 變更函式 + 行號 → file:line + severity |
+| `detect_changes_tool` | **主來源（已實作）**：git diff 風險審查 | `{ "repo_root", "base", "include_source" }` | `review_priorities`（node dict + risk_score）→ file:line + severity |
 
 - `repo_root` 由 plugin 的 `WorkspaceContext` 提供（插件綁定時已知）。
-- `detail_level` 預設 `"minimal"`（token 最小化；plugin 只需節點點位，
-  不需要 source snippet）。
+- 實測：`review_priorities` 內含 `file_path`（**絕對路徑**）、`line_start`、
+  `risk_score`（0.0–1.0）、`name`、`kind`。plugin 在對映時剝掉 `{root_path}/`
+  前綴轉成 workspace 相對路徑（與 graph 節點 `./src/...` 對齊），review_id
+  以相對路徑組成（不含本機絕對路徑，符合開源去識別化）。
 
 ## 5. IngestPayload 對映規則
 

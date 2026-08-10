@@ -35,6 +35,9 @@ pub const PLUGIN_ID: &str = "graphify-plugin-review";
 /// review plugin 狀態。
 pub struct ReviewPlugin {
     workspace_key: String,
+    /// workspace 根目錄（`WorkspaceContext.root_path`；CRG bridge 的
+    /// `repo_root` 參數來源）。
+    root_path: String,
     /// 覆寫 graphify.db 路徑（測試注入用）；`None` = 預設 XDG 路徑。
     registry_path: Option<PathBuf>,
     /// 記憶體 GraphOutput 快取（sync_toon 填入；resolver 使用）。
@@ -75,6 +78,7 @@ impl ReviewPlugin {
     pub fn new() -> Self {
         Self {
             workspace_key: String::new(),
+            root_path: String::new(),
             registry_path: None,
             graph_cache: RwLock::new(None),
             crg_client: CrgMcpClient::new(default_crg_url()),
@@ -202,6 +206,52 @@ impl ReviewPlugin {
         Ok((bound, orphan))
     }
 
+    /// `review_search_crg`：呼叫 CRG `detect_changes_tool`，把
+    /// `review_priorities`（top-10 風險節點）對映成 IngestPayload 後
+    /// 走 `review_ingest` 綁定。
+    ///
+    /// 對映規則見 crg-requirements.md §4/§5：file:line 由 CRG 節點提供，
+    /// severity 由 `risk_score` 對映，workspace_key 用 plugin 綁定 key。
+    ///
+    /// # Errors
+    /// CRG bridge 失敗回傳 [`crate::crg_client::CrgError`]；綁定失敗回傳
+    /// [`IngestError`]。
+    pub fn review_search_crg(&mut self) -> Result<(usize, usize), ReviewSearchError> {
+        if self.root_path.is_empty() {
+            return Err(ReviewSearchError::NoRepoRoot);
+        }
+        let priorities = self.crg_client.detect_changes(&self.root_path)?;
+        let now = crate::sync::now_rfc3339();
+        // CRG 回傳絕對路徑；graph 節點用 workspace 相對路徑（如 `./src/...`），
+        // 先剝掉 `{root_path}/` 前綴再進 resolver。
+        let root_prefix = format!("{}/", self.root_path.trim_end_matches('/'));
+        let reviews: Vec<crate::ingest::ReviewItem> = priorities
+            .into_iter()
+            .filter_map(|p| {
+                let file_path = p.file_path?;
+                let rel = file_path.strip_prefix(&root_prefix).unwrap_or(&file_path);
+                let line_number = p.line_start?;
+                let name = p.name.unwrap_or_else(|| rel.to_string());
+                Some(crate::ingest::ReviewItem {
+                    review_id: format!("crg-{rel}:{line_number}:{name}"),
+                    file_path: rel.to_string(),
+                    line_number,
+                    severity: severity_from_risk(p.risk_score.unwrap_or(0.0)),
+                    category: p.kind.unwrap_or_else(|| "code-review".to_string()),
+                    comment: format!("{name} (risk {})", p.risk_score.unwrap_or(0.0)),
+                    created_at: now.clone(),
+                })
+            })
+            .collect();
+        let payload = IngestPayload {
+            version: "1.0".to_string(),
+            source: "code-review-graph".to_string(),
+            workspace_key: self.workspace_key.clone(),
+            reviews,
+        };
+        Ok(self.review_ingest(&payload)?)
+    }
+
     /// `review_get_context`：查詢指定 canonical node 的未解決 review。
     ///
     /// `include_impact_radius` 目前保留參數（Slice 2 實作 BFS 衝擊半徑）；
@@ -257,6 +307,33 @@ pub fn default_crg_url() -> String {
         .unwrap_or_else(|_| "http://127.0.0.1:8080/mcp".to_string())
 }
 
+/// risk_score（0.0-1.0）→ severity 對映（crg-requirements.md §5）。
+#[must_use]
+pub fn severity_from_risk(risk: f64) -> String {
+    if risk >= 0.8 {
+        "critical".to_string()
+    } else if risk >= 0.5 {
+        "high".to_string()
+    } else if risk >= 0.3 {
+        "medium".to_string()
+    } else if risk > 0.0 {
+        "low".to_string()
+    } else {
+        "info".to_string()
+    }
+}
+
+/// `review_search_crg` 錯誤（CRG bridge 或綁定失敗）。
+#[derive(Debug, thiserror::Error)]
+pub enum ReviewSearchError {
+    #[error("no repo_root: plugin not bound to a workspace")]
+    NoRepoRoot,
+    #[error("CRG bridge error: {0}")]
+    Crg(#[from] crate::crg_client::CrgError),
+    #[error("ingest error: {0}")]
+    Ingest(#[from] IngestError),
+}
+
 impl GraphifyPlugin for ReviewPlugin {
     fn get_id(&self) -> &str {
         PLUGIN_ID
@@ -264,6 +341,7 @@ impl GraphifyPlugin for ReviewPlugin {
 
     fn bind(&mut self, ctx: WorkspaceContext) {
         self.workspace_key = ctx.workspace_key;
+        self.root_path = ctx.root_path;
     }
 
     fn get_workspace_key(&self) -> &str {
@@ -438,6 +516,22 @@ mod tests {
         let ctx = WorkspaceContext::new("w-abc", "review-demo", "/tmp/ws");
         p.bind(ctx);
         assert_eq!(p.get_workspace_key(), "w-abc");
+    }
+
+    #[test]
+    fn severity_from_risk_maps_thresholds() {
+        assert_eq!(severity_from_risk(0.9), "critical");
+        assert_eq!(severity_from_risk(0.6), "high");
+        assert_eq!(severity_from_risk(0.4), "medium");
+        assert_eq!(severity_from_risk(0.1), "low");
+        assert_eq!(severity_from_risk(0.0), "info");
+    }
+
+    #[test]
+    fn search_crg_unbound_returns_no_repo_root() {
+        let mut p = ReviewPlugin::new().with_crg_url("http://127.0.0.1:1/mcp");
+        let err = p.review_search_crg().unwrap_err();
+        assert!(matches!(err, ReviewSearchError::NoRepoRoot));
     }
 
     #[test]

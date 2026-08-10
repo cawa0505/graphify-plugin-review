@@ -143,6 +143,52 @@ impl CrgMcpClient {
         let raw = resp.into_string()?;
         Self::extract_result_content(&raw).ok_or(CrgError::EmptyResult)
     }
+
+    /// 呼叫 `detect_changes_tool`（git diff 風險審查），解析
+    /// `review_priorities`（top-10 風險節點）。
+    ///
+    /// 依契約（crg-requirements.md §4）：`repo_root` 為必帶參數，
+    /// `detail_level` 用 `"standard"`（minimal 只回 name strings，
+    /// 無法取得 file_path/line 對映）。
+    ///
+    /// # Errors
+    /// handshake / 網路 / parse 失敗依情況回傳 [`CrgError`]。
+    pub fn detect_changes(
+        &mut self,
+        repo_root: &str,
+    ) -> Result<Vec<CrgPriority>, CrgError> {
+        self.initialize()?;
+        let text = self.call_tool(
+            "detect_changes_tool",
+            &json!({ "repo_root": repo_root, "detail_level": "standard" }),
+        )?;
+        // text content 是 JSON 字串（實測：structuredContent 與 text 同源）。
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| CrgError::Parse(e.to_string()))?;
+        let priorities = v
+            .get("review_priorities")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| serde_json::from_value::<CrgPriority>(p.clone()).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(priorities)
+    }
+}
+
+/// `detect_changes_tool` 的 `review_priorities` 單筆（依 CRG 源碼
+/// `node_to_dict` shape；只取 plugin 需要的欄位，忽略其餘）。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CrgPriority {
+    pub name: Option<String>,
+    pub qualified_name: Option<String>,
+    pub file_path: Option<String>,
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
+    pub risk_score: Option<f64>,
+    pub kind: Option<String>,
 }
 
 /// CRG client 錯誤。
@@ -158,6 +204,8 @@ pub enum CrgError {
     NoSessionId,
     #[error("empty result from CRG")]
     EmptyResult,
+    #[error("parse error: {0}")]
+    Parse(String),
 }
 
 impl From<ureq::Error> for CrgError {

@@ -19,7 +19,7 @@
   Severity 與綁定時節點的結構 hash（drift guard 用，Slice 1 採 Node.id
   presence diff，signature_hash 寫入固定預設值 `v1_default` — YAGNI 裁決）。
 - **MCP 自動註冊**：`review_ingest` / `review_get_context` /
-  `review_resolve` 由 graphify-mcp 於啟動時自動註冊。
+  `review_resolve` / `review_search_crg` 由 graphify-mcp 於啟動時自動註冊。
 - **Drift Guard & Auto-Resolution（Slice 1）**：`on_graph_updated` 偵測
   review 綁定的 canonical node 已不存在於最新 GraphOutput（rename / 移除 /
   檔案消失）→ 自動標 `resolved` + `resolved_by='auto:node_gone'`，不需 CRG
@@ -35,6 +35,13 @@
   `query_bfs`，種子為 `modified_nodes` 或 prev/cur diff）＋
   graphify-mcp 以 `notifications/review/impact_alert` 推送
   （notify buffer + response 後 drain）。
+- **CRG Bridge（MCP-to-MCP）**：`review_search_crg` 透過 `crg_client` 以
+  MCP-over-HTTP 呼叫已安裝的 `code-review-graph`（CRG）MCP server 的
+  `detect_changes_tool`，取回 `review_priorities`（node dict + risk_score），
+  剝絕對路徑為 workspace 相對路徑後升維綁定至 `review_bindings`。CRG 不可達
+  時 graceful 退避（0 bound, 0 orphan，不阻塞）。CLI：`graphify review
+  search-crg`；MCP：`reviewSearchCrg`。環境變數 `CRG_BASE_URL` 指定 CRG endpoint
+  （未設則 NoOp）。
 
 ## 資料契約
 

@@ -28,6 +28,13 @@
 - [x] **T0.8 CRG MCP Client Skeleton**：`crg_client.rs` — MCP Handshake +
       tools/call 骨架（ureq，Box 化 ureq::Error 避免 large_enum_variant），
       Slice 0 僅 framing，真呼叫 Slice 1/2 接 — commit c344dc4
+- [x] **T0.8b CRG Bridge 真呼叫**：`initialize()` 真呼叫（POST + 快取 session id）
+      + `detect_changes()` 包裝 `detect_changes_tool`（`detail_level: "standard"`）
+      + `CrgPriority` 解析；plugin `review_search_crg` 把 CRG 絕對路徑剝成 workspace
+      相對路徑（對齊 graph 節點 `./src/...`）→ IngestPayload → ingest；CLI
+      `graphify review search-crg` + MCP `reviewSearchCrg` tool 註冊 + dispatch +
+      graph feed；e2e 實測（CRG build 153 nodes → search-crg **10 bound, 0 orphan**
+      → get-context 命中 `initialize` medium risk 0.4）— commit daa0231 + 待 push
 - [x] **T0.9 Tests + graphify-cli/mcp 註冊驗證**：plugin 33/33 單元測試全綠、
       clippy clean；graphify-cli `review` 子指令 + graphify-mcp 3 個 review*
       工具 auto-register（reviewIngest / reviewGetContext / reviewResolve），
