@@ -226,18 +226,25 @@ Node 消失即自動銷案（`resolved_by='auto:node_gone'`），覆蓋 99% 漂�
 
 ### 8.1 衝擊半徑 BFS 公式
 
-- 觸發：`on_graph_updated(event)` 中 `event.modified_nodes` 非空。
-- BFS 種子 = `event.modified_nodes`（實際變動節點）。
+- 觸發：`on_graph_updated(event)` 每次收到 event 時計算種子
+  （`event.modified_nodes` 非空即用之；MCP hook 目前不帶
+  `modified_nodes`，改以 plugin 端 prev/cur node-id diff 補位）。
+- BFS 種子 = 變動節點集合（`event.modified_nodes` 或 prev/cur diff，二選一）。
 - 在 plugin 自己的快取 GraphOutput 上用 graphify-core `query_bfs` 以種子為根、
   `max_depth = 2`（預設；與 `code-review-graph` 的
-  `detect_changes_tool` 預設對齊）走逆向邊（往 upstream callers）。
-- 注意：現在 plugin 持有 `GraphOutput`（plain nodes/edges Vec）並非 `DiGraph`
-  — 必須 `GraphOutput → DiGraph` 轉換 + `find_shortest_path` /
-  query_bfs。**[探勘已完成]** graphify-core **無**公開 `GraphOutput → DiGraph`
-  helper，但 `graphify_core::DiGraph`（petgraph re-export，`lib.rs:25`）為公開
-  型別。T2.1 在 plugin 端自寫 `build_impact_graph(&GraphOutput) -> DiGraph<Node, Edge>`
-  （~30-50 行），不需新依賴、不需 core 改動。`query_bfs` /
-  `find_shortest_path` 入參為 `&DiGraph<Node, Edge>`，自建 DiGraph 即可直接呼叫。
+  `detect_changes_tool` 預設對齊）。
+- **`query_bfs` 實際行為為雙向走訪**（outgoing + incoming 邊都涵蓋；
+  停止條件 `depth >= max_depth`）— 因此 upstream callers 與 downstream
+  callees 都在衝擊集合內，實務上更保守（不漏報）。
+- **[探勘已完成]** `graphify_core::build_graph(&[Node], &[Edge])`
+  （`lib.rs:6`，public）可直接把 `GraphOutput` 轉為 `DiGraph` + node_map，
+  T2.1 **直接複用**，不需 plugin 端自寫 mapping（原 spec 假設的
+  `build_impact_graph` 不需要）。
+- 種子 fallback（`impact_seeds`）：
+  - prev 快照空（首次同步 / baseline）→ 回傳空種子，只建立快照
+    （避免首次 sync 誤報全圖變動）。
+  - 非首次 → diff = 現有 node-id 集合 − prev 集合；回傳新增節點為種子。
+  - 每次呼叫後更新 prev 快照（`RwLock<HashSet<String>>`）。
 
 ### 8.2 Impact Alert 判定與狀態
 
@@ -286,20 +293,29 @@ host-side API。原供選方案：
   Slice 2 T2.3 換成真正 MCP notification 寫入）。
 - 驗證：core 10/10、plugin 38/38、mcp 21/21、clippy 0（三端）。
 
-剩餘工作（Slice 2 範圍）：`on_graph_updated` BFS 命中 → 產 ImpactAlert →
-`emit_notify` → graphify-mcp 把 Value 包成 `notifications/review/impact_alert`
-推送給 Agent。
+**已 shipped（Slice 2 T2.3）**：
+- graphify-mcp 持有 `Mutex<Vec<serde_json::Value>>` notify buffer，
+  `build_review_plugin()` 注入 closure 把 payload push 進 buffer。
+- 主 loop 每輪：處理完 request / notification 並寫出 response 之後，
+  drain buffer — 每個 payload 序列化為
+  `{"jsonrpc":"2.0","method":"notifications/review/impact_alert","params":<payload>}`
+  寫入 stdout（MCP 協定 notification 無 id，client 端「id==response 後
+  short-window 繼續讀取」可收到）。
+- 端到端 e2e 已驗證（fixture：v1 baseline 4 nodes → 加 admin_login →
+  reindex → diff 種子 → BFS 涵蓋 verify_token → critical 綁定
+  r-201 → notification 落地）。
 
 ### 8.4 驗收準則（Slice 2）
 
-- [ ] `on_graph_updated` 中 BFS depth=2，命中 unresolved high/critical
+- [x] `on_graph_updated` 中 BFS depth=2，命中 unresolved high/critical
       binding → 產 ImpactAlert；fixture 含 critical upstream caller 觸發
-      種子變動時 event 落地。
-- [ ] graphify-mcp 端 ImpactAlert → MCP notification 轉發通道打通
-      （依 §8.3 選定方案）。
+      種子變動時 event 落地（e2e：admin_login → verify_token → r-201
+      critical alert 落地）。
+- [x] graphify-mcp 端 ImpactAlert → MCP notification 轉發通道打通
+      （依 §8.3 選定方案，response 後 drain buffer）。
 - [ ] 效能：fixture 50 節點 + 5 reviews 全鏈路（sync_toon → on_graph_updated
-      → BFS → alerts）< 50ms。
-- [ ] 不阻斷：on_graph_updated 中的 BFS 失敗（如 GraphOutput 空白）不丟
+      → BFS → alerts）< 50ms。（微基準未跑，待日後補）
+- [x] 不阻斷：on_graph_updated 中的 BFS 失敗（如 GraphOutput 空白）不丟
       panic，只回 Err + 寫 log 一行（與 Slice 0 「plugin 永不 panic」契約一致）。
 
 ## 9. Slice 路線圖（commit 已落地）
@@ -321,22 +337,25 @@ host-side API。原供選方案：
       auto-register + e2e — GraphifyRust `424cd72`；tasks 同步 `4c5fdc2`
 - [x] 33/33 plugin tests + 21/21 mcp tests + clippy clean
 
-### Slice 1 — Drift Guard & Auto-Resolution（待動工，本 spec 已就緒）
+### Slice 1 — Drift Guard & Auto-Resolution（shipped）
 
-- [ ] T1.1 `signature_hash` YAGNI 裁決 + schema migration
+- [x] T1.1 `signature_hash` YAGNI 裁決 + schema migration
       (`ALTER TABLE ADD COLUMN resolution_reason` 和 `resolved_at`)
-- [ ] T1.2 `on_graph_updated` auto-resolver：node 消失 → resolved
-- [ ] T1.3 `review_resolve` 加 `resolution_reason` 與 `resolved_by`
+- [x] T1.2 `on_graph_updated` auto-resolver：node 消失 → resolved
+- [x] T1.3 `review_resolve` 加 `resolution_reason` 與 `resolved_by`
       欄位回填
-- [ ] T1.4 CRG RFC：`search_reviews` / `resolve_review` 需求規格書
+- [x] T1.4 CRG RFC：`search_reviews` / `resolve_review` 需求規格書
       開出（見 `crg-requirements.md`）
 
-### Slice 2 — Real-time Impact Guard（待 graphify-core v1.1 協商）
+### Slice 2 — Real-time Impact Guard（shipped）
 
-- [ ] T2.1 BFS 衝擊半徑引擎（graphify-core `GraphOutput → DiGraph`
-      helper 允許性確認）
-- [ ] T2.2 `ImpactAlert` domain event struct + 生產邏輯
-- [ ] T2.3 graphify-mcp ImpactAlert → MCP notification 轉發
+- [x] T2.1 BFS 衝擊半徑引擎（複用 `graphify_core::build_graph` +
+      `query_bfs`，種子 fallback：`event.modified_nodes` 或 prev/cur
+      diff；首次 sync 空種子防誤報）
+- [x] T2.2 `ImpactAlert` domain event struct + 生產邏輯（impact.rs，
+      uuid v4 event_id + RFC 3339 generated_at）
+- [x] T2.3 graphify-mcp ImpactAlert → MCP notification 轉發
+      （notify buffer + response 後 drain，`notifications/review/impact_alert`）
       （跟 GraphifyRust 協商 trait v1.1 以選定 §8.3 方案）
 
 ## 10. 對 graphify-core v1 契約驗證

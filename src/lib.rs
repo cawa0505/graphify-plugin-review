@@ -23,6 +23,7 @@ use crate::resolver::resolve_line;
 use crate::sync::{emit_error_packet, emit_packet};
 
 pub mod crg_client;
+pub mod impact;
 pub mod ingest;
 pub mod registry;
 pub mod resolver;
@@ -43,6 +44,10 @@ pub struct ReviewPlugin {
     /// v1.1 host 注入的 notify callback（Slice 2 產 ImpactAlert 時呼叫；
     /// graphify-mcp 注入，plugin 不開自己的 event bus）。
     notify_cb: Option<NotifyCallback>,
+    /// Slice 2 衝擊偵測用：上一次 on_graph_updated 的 node-id 集合。
+    /// 當 event.modified_nodes 為空（mcp 兩處 hook 都傳空）時，以
+    /// prev/cur diff 作為 BFS 種子（與 Slice 1「Node.id 消失/變更」同語意）。
+    prev_node_ids: RwLock<std::collections::HashSet<String>>,
 }
 
 // `Box<dyn Fn>` 不實作 `Debug`，手寫 impl（callback 欄位只印存在與否）。
@@ -74,6 +79,7 @@ impl ReviewPlugin {
             graph_cache: RwLock::new(None),
             crg_client: CrgMcpClient::new(default_crg_url()),
             notify_cb: None,
+            prev_node_ids: RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -286,7 +292,7 @@ impl GraphifyPlugin for ReviewPlugin {
         }
     }
 
-    fn on_graph_updated(&mut self, _event: &GraphUpdateEvent) {
+    fn on_graph_updated(&mut self, event: &GraphUpdateEvent) {
         // Slice 1：drift auto-resolver — presence diff。
         //
         // 裁決（design §7.2）：不做 signature_hash 比對（v1 trait 無 AST handle，
@@ -322,6 +328,21 @@ impl GraphifyPlugin for ReviewPlugin {
                 );
             }
         }
+
+        // Slice 2：Impact Guard — 以變動節點為種子做 BFS 衝擊半徑，命中
+        // unresolved critical/high 綁定則產 ImpactAlert（design §8.1/8.2）。
+        //
+        // 種子來源：event.modified_nodes 優先；為空（graphify-mcp 兩處 hook
+        // 目前都傳空 Vec）則用 prev/cur node-id diff 補位 — 與 Slice 1 的
+        // 「Node.id 消失/變更」判定同語意，讓 CLI + MCP 兩路徑都能觸發。
+        // best-effort：任何失敗靜默跳過，plugin 永不 panic。
+        let seeds = self.impact_seeds(&graph, event);
+        let alerts = crate::impact::detect_impact(&graph, &seeds, &db, &self.workspace_key);
+        for alert in alerts {
+            if let Ok(payload) = serde_json::to_value(&alert) {
+                self.emit_notify(payload);
+            }
+        }
     }
 
     fn set_notify_callback(&mut self, cb: Option<NotifyCallback>) {
@@ -332,12 +353,46 @@ impl GraphifyPlugin for ReviewPlugin {
 impl ReviewPlugin {
     /// v1.1 事件推送：把序列化 payload 交給 host 注入的 callback（若存在）。
     /// host（graphify-mcp）負責轉發；無 callback 時靜默跳過。
-    // ponytail: Slice 2 on_graph_updated BFS 命中時才呼叫，v1.1 先鋪管線
-    #[allow(dead_code)]
     pub(crate) fn emit_notify(&self, payload: serde_json::Value) {
         if let Some(cb) = &self.notify_cb {
             cb(payload);
         }
+    }
+
+    /// 計算 Slice 2 BFS 種子：event.modified_nodes 非空直接用；為空則以
+    /// 本次 graph 與上次快照的 node-id 差集補位。回傳後更新快照。
+    ///
+    /// ponytail: mcp 兩處 hook 目前都傳空 modified_nodes，diff 是唯一能讓
+    /// impact guard 在真實路徑觸發的種子來源；若日後 host 開始傳真實
+    /// modified_nodes，diff 分支自然不再被走到，但保留作為 fallback。
+    fn impact_seeds(&self, graph: &GraphOutput, event: &GraphUpdateEvent) -> Vec<graphify_core::NodeId> {
+        if !event.modified_nodes.is_empty() {
+            return event.modified_nodes.clone();
+        }
+        let cur: std::collections::HashSet<&str> =
+            graph.nodes.iter().map(|n| n.id.0.as_str()).collect();
+        let prev = self.prev_node_ids.read().ok();
+        // 首次同步（prev 尚無 baseline）→ 只建立快照，不視為變動（避免
+        // 初次載入就對所有 critical/high 綁定發出噪音 alert）。
+        let seeds = match prev {
+            Some(prev) if prev.is_empty() => Vec::new(),
+            Some(prev) => prev
+                .iter()
+                .filter(|id| !cur.contains(id.as_str()))
+                .map(|id| graphify_core::NodeId(id.clone()))
+                .chain(
+                    cur.iter()
+                        .filter(|id| !prev.contains(**id))
+                        .map(|id| graphify_core::NodeId(id.to_string())),
+                )
+                .collect(),
+            None => Vec::new(),
+        };
+        // 更新快照（讀鎖已 drop）。
+        if let Ok(mut prev) = self.prev_node_ids.write() {
+            *prev = graph.nodes.iter().map(|n| n.id.0.clone()).collect();
+        }
+        seeds
     }
 
     /// 審查摘要（sync_toon plugin_data 用）：bound 數 + 未解決數。
@@ -525,6 +580,39 @@ mod tests {
         }
     }
 
+    /// 雙節點 + calls edge 圖：caller → callee（Slice 2 BFS 衝擊測試用）。
+    fn caller_graph(caller: &str, callee: &str) -> GraphOutput {
+        let mut g = node_graph(caller);
+        let callee_node = graphify_core::Node {
+            id: graphify_core::NodeId(callee.to_string()),
+            label: callee.rsplit(':').next().unwrap_or("n").to_string(),
+            file_type: graphify_core::FileType::Code,
+            kind: "function".to_string(),
+            language: "rust".to_string(),
+            source_file: callee
+                .rsplitn(3, ':')
+                .nth(2)
+                .unwrap_or("src/auth.rs")
+                .to_string(),
+            start_line: 1,
+            end_line: 50,
+            doc_comment: None,
+            description: None,
+            metadata: None,
+        };
+        g.nodes.push(callee_node);
+        g.edges.push(graphify_core::Edge {
+            source: graphify_core::NodeId(caller.to_string()),
+            target: graphify_core::NodeId(callee.to_string()),
+            relation: "calls".to_string(),
+            source_file: "src/main.rs".to_string(),
+            confidence: "high".to_string(),
+            source_location: "src/main.rs:1".to_string(),
+            description: None,
+        });
+        g
+    }
+
     #[test]
     fn on_graph_updated_auto_resolves_drifted_node() {
         let (_d, p) = plugin_with_tmp_db();
@@ -612,6 +700,51 @@ mod tests {
         assert_eq!(rows.len(), 1, "present node stays unresolved");
     }
 
+    /// Slice 2 baseline：首次 on_graph_updated（prev 快照為空）不視為變動，
+    /// 即使存在 critical 綁定也不發 ImpactAlert（避免初次載入噪音）。
+    #[test]
+    fn first_sync_is_baseline_no_impact_alert() {
+        let (_d, p) = plugin_with_tmp_db();
+        let mut p = p;
+        p.bind(WorkspaceContext::new("w-1", "ws", "/tmp/ws"));
+
+        let alerts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&alerts);
+        p.set_notify_callback(Some(Box::new(move |payload| {
+            sink.lock().expect("sink lock").push(payload);
+        })));
+
+        // 圖 v1：verify_token（critical 綁定）→ 首次同步 = baseline
+        let toon = graphify_core::to_toon(&node_graph("src/auth.rs:function:verify_token"));
+        p.sync_toon(Some(toon.into_bytes()));
+        let payload = IngestPayload {
+            version: "1.0".to_string(),
+            source: "code-review-graph".to_string(),
+            workspace_key: "w-1".to_string(),
+            reviews: vec![crate::ingest::ReviewItem {
+                review_id: "crg-base-001".to_string(),
+                file_path: "src/auth.rs".to_string(),
+                line_number: 42,
+                severity: "critical".to_string(),
+                category: "security".to_string(),
+                comment: "hardcoded secret".to_string(),
+                created_at: "2026-08-10T00:00:00Z".to_string(),
+            }],
+        };
+        p.review_ingest(&payload).unwrap();
+
+        let event = graphify_core::GraphUpdateEvent::new(
+            "w-1",
+            Vec::new(),
+            graphify_core::GraphUpdateKind::Indexed,
+        );
+        p.on_graph_updated(&event);
+        assert!(
+            alerts.lock().expect("alerts lock").is_empty(),
+            "first sync must not alert (baseline)"
+        );
+    }
+
     #[test]
     fn sync_toon_none_does_not_panic() {
         let (_d, p) = plugin_with_tmp_db();
@@ -666,5 +799,69 @@ mod tests {
         let mut p = p;
         p.bind(WorkspaceContext::new("w-1", "ws", "/tmp/ws"));
         p.emit_notify(serde_json::json!({ "event": "impact_alert" }));
+    }
+
+    /// Slice 2 e2e：caller 變動 → BFS 涵蓋 callee 上的 critical 綁定 →
+    /// 透過 notify callback 發出 ImpactAlert。
+    #[test]
+    fn impact_alert_emitted_when_caller_changes() {
+        let (_d, p) = plugin_with_tmp_db();
+        let mut p = p;
+        p.bind(WorkspaceContext::new("w-1", "ws", "/tmp/ws"));
+
+        let alerts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&alerts);
+        p.set_notify_callback(Some(Box::new(move |payload| {
+            sink.lock().expect("sink lock").push(payload);
+        })));
+
+        // 圖 v1（baseline）：main → calls → verify_token，critical 綁定
+        let toon = graphify_core::to_toon(&caller_graph(
+            "src/main.rs:function:main",
+            "src/auth.rs:function:verify_token",
+        ));
+        p.sync_toon(Some(toon.into_bytes()));
+        let payload = IngestPayload {
+            version: "1.0".to_string(),
+            source: "code-review-graph".to_string(),
+            workspace_key: "w-1".to_string(),
+            reviews: vec![crate::ingest::ReviewItem {
+                review_id: "crg-impact-001".to_string(),
+                file_path: "src/auth.rs".to_string(),
+                line_number: 42,
+                severity: "critical".to_string(),
+                category: "security".to_string(),
+                comment: "hardcoded secret".to_string(),
+                created_at: "2026-08-10T00:00:00Z".to_string(),
+            }],
+        };
+        p.review_ingest(&payload).unwrap();
+        p.on_graph_updated(&graphify_core::GraphUpdateEvent::new(
+            "w-1",
+            Vec::new(),
+            graphify_core::GraphUpdateKind::Indexed,
+        ));
+        assert!(alerts.lock().expect("alerts lock").is_empty(), "baseline: no alert");
+
+        // 圖 v2：新 caller 出現（main2 → calls → verify_token）→ 種子變動
+        let toon2 = graphify_core::to_toon(&caller_graph(
+            "src/admin.rs:function:admin_login",
+            "src/auth.rs:function:verify_token",
+        ));
+        p.sync_toon(Some(toon2.into_bytes()));
+        p.on_graph_updated(&graphify_core::GraphUpdateEvent::new(
+            "w-1",
+            Vec::new(),
+            graphify_core::GraphUpdateKind::Indexed,
+        ));
+
+        let got = alerts.lock().expect("alerts lock");
+        assert_eq!(got.len(), 1, "exactly one impact alert expected");
+        let alert = got.first().expect("alert");
+        assert_eq!(alert["max_severity"], "critical");
+        assert!(
+            serde_json::to_string(alert).unwrap().contains("verify_token"),
+            "impacted node must be in payload: {alert}"
+        );
     }
 }

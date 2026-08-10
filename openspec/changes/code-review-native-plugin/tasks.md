@@ -65,23 +65,26 @@
 
 > 細部 spec：design.md §8。graphify-core v1.1 延伸需求見 §10。
 
-- [ ] **T2.1 Impact Radius Inspection Engine**：在 `on_graph_updated`
-      中以 `event.modified_nodes` 為種子，用 graphify-core `query_bfs`
-      `max_depth=2` 逆向邊走 BFS。**前置確認（已完成）**：
-      graphify-core 無公開 `GraphOutput → DiGraph` helper（types.rs:45
-      無 to_digraph）；petgraph 已在 core lib.rs:25 re-export
-      （`pub use petgraph::graph::{Graph, DiGraph}`），`query_bfs` /
-      `find_shortest_path` 都吃 `&DiGraph<Node, Edge>`。結論：plugin
-      端自寫 ~30–50 行 mapping 層（resolver.rs 或 sync.rs），不需新
-      dependency。
-- [ ] **T2.2 ImpactAlert Domain Event 產出**：對 BFS 涵蓋集合內每個
+- [x] **T2.1 Impact Radius Inspection Engine**：在 `on_graph_updated`
+      中以 `event.modified_nodes` 為種子（MCP hook 目前不帶
+      `modified_nodes` → plugin 端 prev/cur node-id diff 補位），用
+      graphify-core `query_bfs` `max_depth=2` 走 BFS（雙向，含
+      upstream callers + downstream callees）。**前置確認（已完成）**：
+      `graphify_core::build_graph`（lib.rs:6，public）直接做
+      `GraphOutput → DiGraph` + node_map 轉換 — **複用，不需自寫
+      mapping 層**。首次 sync prev 空 → 空種子（只建 baseline，
+      防誤報）。
+- [x] **T2.2 ImpactAlert Domain Event 產出**：對 BFS 涵蓋集合內每個
       node，查 unresolved high/critical → 結構化 `ImpactAlert` 結構
-      （design §8.2）。
+      （design §8.2；impact.rs，uuid v4 event_id + RFC 3339
+      generated_at）。
 - [x] **T2.3 前置（trait v1.1）已 shipped**：graphify-core 加
       `NotifyCallback` + `set_notify_callback` default no-op；review
       plugin 覆寫儲存 + `emit_notify`；graphify-mcp `build_review_plugin()`
       注入 callback（v1.1 先 stderr log）。驗證三端全綠
       （core 10/10、plugin 38/38、mcp 21/21、clippy 0）。
-- [ ] **T2.3 graphify-mcp 轉發 ImpactAlert**：graphify-mcp 端把
+- [x] **T2.3 graphify-mcp 轉發 ImpactAlert**：graphify-mcp 端把
       `emit_notify` 收到的 Value 包成 MCP `notifications/review/impact_alert`
-      推送（取代 v1.1 的 stderr log）。
+      推送（notify buffer + response 後 drain；取代 v1.1 的 stderr log）。
+      e2e 已驗證：v1 4 nodes baseline → 加 admin_login → reindex →
+      diff 種子 → BFS 涵蓋 verify_token → critical r-201 alert 落地。

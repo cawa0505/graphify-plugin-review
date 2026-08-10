@@ -17,6 +17,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "1"
 # CRG MCP client 骨架（Slice 0 僅 framing，Slice 1/2 接真呼叫）。
 ureq = { version = "2", default-features = false, features = ["json"] }
+# ImpactAlert.event_id（design §8.2 uuid v4）。
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
