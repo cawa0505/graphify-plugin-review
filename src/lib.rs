@@ -213,13 +213,17 @@ impl ReviewPlugin {
     /// 對映規則見 crg-requirements.md §4/§5：file:line 由 CRG 節點提供，
     /// severity 由 `risk_score` 對映，workspace_key 用 plugin 綁定 key。
     ///
+    /// 回傳 `(bound_node_ids, orphan_count)`：`bound_node_ids` 是本輪
+    /// 成功綁定（line→symbol 解析命中）的 canonical node ids，供呼叫端
+    /// 直接鏈式 `review_get_context` round-trip；orphan = 未命中的行數。
+    ///
     /// # Errors
     /// CRG bridge 失敗回傳 [`crate::crg_client::CrgError`]；綁定失敗回傳
     /// [`IngestError`]。
     pub fn review_search_crg(
         &mut self,
         base: Option<&str>,
-    ) -> Result<(usize, usize), ReviewSearchError> {
+    ) -> Result<(Vec<String>, usize), ReviewSearchError> {
         if self.root_path.is_empty() {
             return Err(ReviewSearchError::NoRepoRoot);
         }
@@ -252,7 +256,22 @@ impl ReviewPlugin {
             workspace_key: self.workspace_key.clone(),
             reviews,
         };
-        Ok(self.review_ingest(&payload)?)
+        let (_, orphan) = self.review_ingest(&payload)?;
+        // 回傳本輪實際綁定的 canonical node ids（用 review_id 精確取回，
+        // 不含先前輪次的殘留）。
+        let db = self.db()?;
+        let bound_ids = payload
+            .reviews
+            .iter()
+            .filter_map(|r| {
+                db.get(&self.workspace_key, &r.review_id)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.canonical_node_id)
+                    .filter(|n| !n.is_empty())
+            })
+            .collect();
+        Ok((bound_ids, orphan))
     }
 
     /// `review_get_context`：查詢指定 canonical node 的未解決 review。
@@ -335,6 +354,8 @@ pub enum ReviewSearchError {
     Crg(#[from] crate::crg_client::CrgError),
     #[error("ingest error: {0}")]
     Ingest(#[from] IngestError),
+    #[error("registry db error: {0}")]
+    Db(#[from] rusqlite::Error),
 }
 
 impl GraphifyPlugin for ReviewPlugin {
@@ -651,6 +672,123 @@ mod tests {
 
         let (_, rows) = p.review_get_context("w-1", "", true).unwrap();
         assert_eq!(rows.len(), 0, "resolved reviews no longer surface as unresolved");
+    }
+
+    /// 假 CRG server：對 `initialize` 回 `Mcp-Session-Id` header，對
+    /// `detect_changes_tool` 回罐頭 `review_priorities`（1 筆）。
+    /// 回傳 base URL（`http://127.0.0.1:{port}/mcp`）。
+    fn fake_crg_server() -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let priorities = serde_json::json!({
+            "status": "ok",
+            "risk_score": 0.42,
+            "changed_file_count": 1,
+            "review_priorities": [{
+                "name": "verify_token",
+                "qualified_name": "crate::auth::verify_token",
+                "file_path": "/tmp/ws/src/auth.rs",
+                "line_start": 42,
+                "line_end": 50,
+                "risk_score": 0.4,
+                "kind": "function",
+            }],
+        })
+        .to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                // 讀 request head + body（依 Content-Length）
+                let mut all = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            all.extend_from_slice(&chunk[..n]);
+                            if let Some(hdr_end) =
+                                all.windows(4).position(|w| w == b"\r\n\r\n")
+                            {
+                                let head =
+                                    String::from_utf8_lossy(&all[..hdr_end]);
+                                let clen: usize = head
+                                    .lines()
+                                    .find_map(|l| {
+                                        l.to_ascii_lowercase()
+                                            .strip_prefix("content-length:")
+                                            .map(|v| v.trim().parse().unwrap_or(0))
+                                    })
+                                    .unwrap_or(0);
+                                if all.len() >= hdr_end + 4 + clen {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&all);
+                let (status, body) = if head.contains("initialize") {
+                    (
+                        "200 OK",
+                        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake-crg","version":"0.0.0"}}}"#
+                            .to_string(),
+                    )
+                } else if head.contains("detect_changes_tool") {
+                    let text = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": { "content": [{ "type": "text", "text": priorities }] },
+                    })
+                    .to_string();
+                    ("200 OK", text)
+                } else {
+                    ("404 Not Found", "{}".to_string())
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nMcp-Session-Id: ses-fake\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    #[test]
+    fn search_crg_roundtrip_binds_and_returns_node_ids() {
+        let url = fake_crg_server();
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = ReviewPlugin::new()
+            .with_registry_path(dir.path().join("graphify.db"))
+            .with_crg_url(url);
+        p.bind(WorkspaceContext::new("w-1", "ws", "/tmp/ws"));
+        // graph 快取：src/auth.rs:function:verify_token 涵蓋 line 42
+        let toon =
+            graphify_core::to_toon(&node_graph("src/auth.rs:function:verify_token"));
+        p.sync_toon(Some(toon.into_bytes()));
+
+        // search → 回實際綁定的 node ids（不再只回計數）
+        let (node_ids, orphan) = p.review_search_crg(None).unwrap();
+        assert_eq!(orphan, 0);
+        assert_eq!(
+            node_ids,
+            vec!["src/auth.rs:function:verify_token".to_string()]
+        );
+
+        // round-trip：用回傳的 node id 讀回綁定
+        let (node, rows) = p
+            .review_get_context("w-1", &node_ids[0], true)
+            .unwrap();
+        assert_eq!(node, "src/auth.rs:function:verify_token");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "crg-src/auth.rs:42:verify_token");
+        assert_eq!(rows[0].severity, "medium"); // risk 0.4
     }
 
     fn node_graph(node_id: &str) -> GraphOutput {
