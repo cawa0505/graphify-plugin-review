@@ -27,7 +27,7 @@ pub struct CrgMcpClient {
 }
 
 impl CrgMcpClient {
-    /// 建立 client（`base_url` 如 `http://127.0.0.1:9877/mcp`）。
+    /// 建立 client（`base_url` 如 `http://127.0.0.1:8080/mcp`）。
     #[must_use]
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
@@ -55,6 +55,34 @@ impl CrgMcpClient {
                 "clientInfo": { "name": "graphify-plugin-review", "version": "0.1.0" }
             }
         })
+    }
+
+    /// 執行 MCP `initialize` handshake（streamable HTTP POST）。
+    ///
+    /// 從回應 header `Mcp-Session-Id` 快取 session id；重複呼叫為
+    /// no-op（回傳既有 session）。CRG 不可達 / 無 session header → Err。
+    ///
+    /// # Errors
+    /// 網路/HTTP 失敗回傳 [`ureq::Error`]；回應缺 session id 回傳
+    /// [`CrgError::NoSessionId`]。
+    pub fn initialize(&mut self) -> Result<String, CrgError> {
+        if let Some(session) = &self.session_id {
+            return Ok(session.clone());
+        }
+        let resp = ureq::post(&self.base_url)
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json, text/event-stream")
+            .timeout(Duration::from_secs(10))
+            .send_json(Self::initialize_request())?;
+        // MCP Streamable HTTP：session id 由 initialize 回應 header 提供。
+        let session = resp
+            .header("Mcp-Session-Id")
+            .ok_or(CrgError::NoSessionId)?
+            .to_string();
+        self.session_id = Some(session.clone());
+        // 讀完 body 讓連線可重用（header 已取，body 不需要）。
+        let _ = resp.into_string();
+        Ok(session)
     }
 
     /// 產出 `tools/call` 請求 body（framing 測試用）。
@@ -126,6 +154,8 @@ pub enum CrgError {
     Io(#[from] std::io::Error),
     #[error("not initialized: call initialize() first")]
     NotInitialized,
+    #[error("no Mcp-Session-Id in initialize response")]
+    NoSessionId,
     #[error("empty result from CRG")]
     EmptyResult,
 }
@@ -194,5 +224,23 @@ mod tests {
     fn tool_list_matches_crg() {
         assert_eq!(CRG_TOOLS.len(), 4);
         assert!(CRG_TOOLS.contains(&"detect_changes_tool"));
+    }
+
+    #[test]
+    fn initialize_is_noop_when_already_initialized() {
+        let mut c = CrgMcpClient::new("http://127.0.0.1:1/mcp");
+        c.session_id = Some("ses-test".to_string());
+        // 已初始化 → 不回網路，直接回傳快取 session。
+        assert_eq!(c.initialize().unwrap(), "ses-test");
+        assert_eq!(c.session_id.as_deref(), Some("ses-test"));
+    }
+
+    #[test]
+    fn initialize_unreachable_server_fails() {
+        let mut c = CrgMcpClient::new("http://127.0.0.1:1/mcp");
+        // 127.0.0.1:1 幾乎必然拒連 — 回 Ureq，不 panic。
+        let err = c.initialize().unwrap_err();
+        assert!(matches!(err, CrgError::Ureq(_)));
+        assert!(c.session_id.is_none());
     }
 }

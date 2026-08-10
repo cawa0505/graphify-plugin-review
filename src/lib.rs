@@ -250,11 +250,11 @@ impl ReviewPlugin {
 }
 
 /// 預設 CRG base url（`CRG_BASE_URL` 環境變數覆寫；未設定時回
-/// `http://127.0.0.1:9877/mcp`）。
+/// `http://127.0.0.1:8080/mcp`，loopback 範例端口，對齊 crg-requirements.md）。
 #[must_use]
 pub fn default_crg_url() -> String {
     std::env::var("CRG_BASE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:9877/mcp".to_string())
+        .unwrap_or_else(|_| "http://127.0.0.1:8080/mcp".to_string())
 }
 
 impl GraphifyPlugin for ReviewPlugin {
