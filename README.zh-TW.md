@@ -28,9 +28,12 @@
 - **review_resolve 完整化**：手動銷案接受 `resolved_by`（如 `manual`）與
   `resolution_reason` 參數,寫入 `review_bindings` 的 `resolved_by` /
   `resolution_reason` / `resolved_at` 欄位。
-- **Impact Guard（Slice 2，待 trait v1.1）**：`on_graph_updated` 偵測變動
-  觸及 high/critical 未解決點位時，產出 ImpactAlert domain event 經由
+- **Impact Guard（Slice 2）**：`on_graph_updated` 偵測變動觸及
+  high/critical 未解決點位時，產出 ImpactAlert domain event 經由
   trait v1.1 notify callback closure 交由 graphify-mcp 轉發。
+  **trait v1.1 已 shipped**（`NotifyCallback` + `set_notify_callback`
+  default no-op + mcp 注入）；Slice 2 剩 BFS 衝擊半徑 + 真 MCP
+  notification 轉發。
 
 ## 資料契約
 

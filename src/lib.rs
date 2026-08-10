@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use graphify_core::plugin::{GraphUpdateEvent, GraphifyPlugin, WorkspaceContext};
-use graphify_core::{from_toon, GraphOutput};
+use graphify_core::{from_toon, GraphOutput, NotifyCallback};
 
 use crate::crg_client::CrgMcpClient;
 use crate::ingest::{parse_payload_file, IngestError, IngestPayload};
@@ -32,7 +32,6 @@ pub mod sync;
 pub const PLUGIN_ID: &str = "graphify-plugin-review";
 
 /// review plugin 狀態。
-#[derive(Debug)]
 pub struct ReviewPlugin {
     workspace_key: String,
     /// 覆寫 graphify.db 路徑（測試注入用）；`None` = 預設 XDG 路徑。
@@ -41,6 +40,22 @@ pub struct ReviewPlugin {
     graph_cache: RwLock<Option<GraphOutput>>,
     /// CRG MCP client 骨架（Slice 1/2 接真呼叫）。
     crg_client: CrgMcpClient,
+    /// v1.1 host 注入的 notify callback（Slice 2 產 ImpactAlert 時呼叫；
+    /// graphify-mcp 注入，plugin 不開自己的 event bus）。
+    notify_cb: Option<NotifyCallback>,
+}
+
+// `Box<dyn Fn>` 不實作 `Debug`，手寫 impl（callback 欄位只印存在與否）。
+impl std::fmt::Debug for ReviewPlugin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReviewPlugin")
+            .field("workspace_key", &self.workspace_key)
+            .field("registry_path", &self.registry_path)
+            .field("graph_cache", &self.graph_cache)
+            .field("crg_client", &self.crg_client)
+            .field("notify_cb", &self.notify_cb.is_some())
+            .finish()
+    }
 }
 
 impl Default for ReviewPlugin {
@@ -58,6 +73,7 @@ impl ReviewPlugin {
             registry_path: None,
             graph_cache: RwLock::new(None),
             crg_client: CrgMcpClient::new(default_crg_url()),
+            notify_cb: None,
         }
     }
 
@@ -307,9 +323,23 @@ impl GraphifyPlugin for ReviewPlugin {
             }
         }
     }
+
+    fn set_notify_callback(&mut self, cb: Option<NotifyCallback>) {
+        self.notify_cb = cb;
+    }
 }
 
 impl ReviewPlugin {
+    /// v1.1 事件推送：把序列化 payload 交給 host 注入的 callback（若存在）。
+    /// host（graphify-mcp）負責轉發；無 callback 時靜默跳過。
+    // ponytail: Slice 2 on_graph_updated BFS 命中時才呼叫，v1.1 先鋪管線
+    #[allow(dead_code)]
+    pub(crate) fn emit_notify(&self, payload: serde_json::Value) {
+        if let Some(cb) = &self.notify_cb {
+            cb(payload);
+        }
+    }
+
     /// 審查摘要（sync_toon plugin_data 用）：bound 數 + 未解決數。
     fn summary_json(&self) -> serde_json::Value {
         let db = self.db();
@@ -602,5 +632,39 @@ mod tests {
         assert!(text.contains("workspace_key"), "summary packet expected: {text}");
         let g = p.graph().expect("garbage toon caches an empty graph");
         assert!(g.nodes.is_empty());
+    }
+
+    /// v1.1：host 注入 callback 後，emit_notify 的 payload 到達 host 端。
+    #[test]
+    fn notify_callback_reaches_host_with_payload() {
+        let (_d, p) = plugin_with_tmp_db();
+        let mut p = p;
+        p.bind(WorkspaceContext::new("w-1", "ws", "/tmp/ws"));
+
+        let received = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&received);
+        p.set_notify_callback(Some(Box::new(move |payload| {
+            *sink.lock().expect("sink lock") = Some(payload);
+        })));
+
+        p.emit_notify(serde_json::json!({
+            "event": "impact_alert",
+            "severity": "critical",
+            "node": "src/auth.rs:function:verify_token",
+        }));
+
+        let got = received.lock().expect("received lock");
+        let got = got.as_ref().expect("payload must reach host");
+        assert_eq!(got["event"], "impact_alert");
+        assert_eq!(got["severity"], "critical");
+    }
+
+    /// v1.1：未注入 callback 時 emit_notify 靜默跳過（不 panic）。
+    #[test]
+    fn emit_notify_without_callback_is_noop() {
+        let (_d, p) = plugin_with_tmp_db();
+        let mut p = p;
+        p.bind(WorkspaceContext::new("w-1", "ws", "/tmp/ws"));
+        p.emit_notify(serde_json::json!({ "event": "impact_alert" }));
     }
 }

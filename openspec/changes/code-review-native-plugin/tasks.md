@@ -67,15 +67,21 @@
 
 - [ ] **T2.1 Impact Radius Inspection Engine**：在 `on_graph_updated`
       中以 `event.modified_nodes` 為種子，用 graphify-core `query_bfs`
-      `max_depth=2` 逆向邊走 BFS。**前置確認**：
-      graphify-core 有無公開 `GraphOutput → DiGraph` helper — 若無，
-      提需求給 GraphifyRust 開 v1.1（或 plugin 端自寫轉換並標
-      ponytail 註解）。
+      `max_depth=2` 逆向邊走 BFS。**前置確認（已完成）**：
+      graphify-core 無公開 `GraphOutput → DiGraph` helper（types.rs:45
+      無 to_digraph）；petgraph 已在 core lib.rs:25 re-export
+      （`pub use petgraph::graph::{Graph, DiGraph}`），`query_bfs` /
+      `find_shortest_path` 都吃 `&DiGraph<Node, Edge>`。結論：plugin
+      端自寫 ~30–50 行 mapping 層（resolver.rs 或 sync.rs），不需新
+      dependency。
 - [ ] **T2.2 ImpactAlert Domain Event 產出**：對 BFS 涵蓋集合內每個
       node，查 unresolved high/critical → 結構化 `ImpactAlert` 結構
       （design §8.2）。
-- [ ] **T2.3 graphify-mcp 轉發 ImpactAlert**：與 GraphifyRust 協商
-      trait v1.1 延伸（design §8.3 方案選定：推薦方案 A 透過 trait 注入
-      notify callback closure）；溝通完成後
-      graphify-mcp 端把 ImpactAlert 序列化為 MCP
-      `notifications/review/impact_alert` 推送。
+- [x] **T2.3 前置（trait v1.1）已 shipped**：graphify-core 加
+      `NotifyCallback` + `set_notify_callback` default no-op；review
+      plugin 覆寫儲存 + `emit_notify`；graphify-mcp `build_review_plugin()`
+      注入 callback（v1.1 先 stderr log）。驗證三端全綠
+      （core 10/10、plugin 38/38、mcp 21/21、clippy 0）。
+- [ ] **T2.3 graphify-mcp 轉發 ImpactAlert**：graphify-mcp 端把
+      `emit_notify` 收到的 Value 包成 MCP `notifications/review/impact_alert`
+      推送（取代 v1.1 的 stderr log）。

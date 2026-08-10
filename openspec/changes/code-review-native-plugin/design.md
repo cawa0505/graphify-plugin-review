@@ -259,23 +259,36 @@ Node 消失即自動銷案（`resolved_by='auto:node_gone'`），覆蓋 99% 漂�
   }
   ```
 
-### 8.3 接 graphify-mcp 轉發（graphify-mcp 協商點）
+### 8.3 接 graphify-mcp 轉發（已定案：方案 A，trait v1.1 已 shipped）
 
 graphify-mcp 監聽什麼？v1 trait 不含 `subscribe_impact_alert` 之類的
-host-side API。供選方案（待 GraphifyRust 協商）:
+host-side API。原供選方案：
 
 - **方案 A**：plugin 在 `on_graph_updated` 內直接 `notify_impact_alert(...)`
   呼叫透過 trait 注入的 callback closure → graphify-mcp 在建構 plugin時注入
   寫入 `mcp_notify_tx` 的 closure，把 ImpactAlert 序列化為 MCP
   `notifications/review/impact_alert` 推送。**需 trait v1.1 加 callback
-  欄位或 constructor hook**。
+  欄位或 constructor hook**。← **已選定並實作**
 - **方案 B**：plugin 把 ImpactAlert 寫入 graphify.db 或共用 ring buffer；
   graphify-mcp 自己 poll 取出轉發。 高 latency、輪詢成本。
 - **方案 C**：v1 trait 新增 `take_impact_alerts(&mut self) -> Vec<ImpactAlert>`
   方法讓 host 每輪 event 後取走。**需 trait v1.1**。
 
-推薦 **方案 A**（最低 latency、與 trait 哲學一致）。**待 GraphifyRust 端
-協商 v1.1 變更 [待討論]。**
+**已 shipped（trait v1.1）**：
+- `graphify-core::NotifyCallback = Box<dyn Fn(serde_json::Value) + Send + Sync>`
+  （core 已含 serde_json；payload 用 Value 保持 core plugin-agnostic，
+  ImpactAlert struct 屬 review plugin 領域，跨邊界序列化）。
+- trait 新增 `fn set_notify_callback(&mut self, _cb: Option<NotifyCallback>)`
+  **default no-op** — v1 plugins（handoff / relay / opendoc）零改動相容。
+- review plugin 覆寫儲存 callback，提供 `emit_notify(payload)` 內部通道
+  （Slice 2 `on_graph_updated` BFS 命中時呼叫）。
+- graphify-mcp `build_review_plugin()` 注入 callback（v1.1 先 stderr log；
+  Slice 2 T2.3 換成真正 MCP notification 寫入）。
+- 驗證：core 10/10、plugin 38/38、mcp 21/21、clippy 0（三端）。
+
+剩餘工作（Slice 2 範圍）：`on_graph_updated` BFS 命中 → 產 ImpactAlert →
+`emit_notify` → graphify-mcp 把 Value 包成 `notifications/review/impact_alert`
+推送給 Agent。
 
 ### 8.4 驗收準則（Slice 2）
 
