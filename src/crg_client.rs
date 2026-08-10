@@ -156,12 +156,14 @@ impl CrgMcpClient {
     pub fn detect_changes(
         &mut self,
         repo_root: &str,
+        base: Option<&str>,
     ) -> Result<Vec<CrgPriority>, CrgError> {
         self.initialize()?;
-        let text = self.call_tool(
-            "detect_changes_tool",
-            &json!({ "repo_root": repo_root, "detail_level": "standard" }),
-        )?;
+        let mut args = json!({ "repo_root": repo_root, "detail_level": "standard" });
+        if let Some(b) = base {
+            args["base"] = json!(b);
+        }
+        let text = self.call_tool("detect_changes_tool", &args)?;
         // text content 是 JSON 字串（實測：structuredContent 與 text 同源）。
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| CrgError::Parse(e.to_string()))?;

@@ -216,11 +216,14 @@ impl ReviewPlugin {
     /// # Errors
     /// CRG bridge 失敗回傳 [`crate::crg_client::CrgError`]；綁定失敗回傳
     /// [`IngestError`]。
-    pub fn review_search_crg(&mut self) -> Result<(usize, usize), ReviewSearchError> {
+    pub fn review_search_crg(
+        &mut self,
+        base: Option<&str>,
+    ) -> Result<(usize, usize), ReviewSearchError> {
         if self.root_path.is_empty() {
             return Err(ReviewSearchError::NoRepoRoot);
         }
-        let priorities = self.crg_client.detect_changes(&self.root_path)?;
+        let priorities = self.crg_client.detect_changes(&self.root_path, base)?;
         let now = crate::sync::now_rfc3339();
         // CRG 回傳絕對路徑；graph 節點用 workspace 相對路徑（如 `./src/...`），
         // 先剝掉 `{root_path}/` 前綴再進 resolver。
@@ -530,7 +533,7 @@ mod tests {
     #[test]
     fn search_crg_unbound_returns_no_repo_root() {
         let mut p = ReviewPlugin::new().with_crg_url("http://127.0.0.1:1/mcp");
-        let err = p.review_search_crg().unwrap_err();
+        let err = p.review_search_crg(None).unwrap_err();
         assert!(matches!(err, ReviewSearchError::NoRepoRoot));
     }
 
