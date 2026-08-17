@@ -52,7 +52,8 @@ pub fn resolve_line(
 }
 
 /// `node_path` 是否代表 `want`（workspace-root 相對路徑）。
-/// 精確相等，或兩者都以 `/` 分隔且 node_path 以 `want` 結尾。
+/// 精確相等，或兩者都以 `/` 分隔且 node_path 以 `want` 結尾，
+/// 或 want 以 node_path 結尾（反向匹配，處理 ingest payload 給絕對路徑而 graph 給相對路徑的情況）。
 #[must_use]
 pub fn file_matches(node_path: &str, want: &str) -> bool {
     if node_path == want {
@@ -61,7 +62,8 @@ pub fn file_matches(node_path: &str, want: &str) -> bool {
     if want.is_empty() {
         return false;
     }
-    // 只做有把握的 suffix 比對：want 本身含 `/`（是相對路徑而非檔名）
+
+    // 正向：node_path 以 want 結尾（graph 路徑長，payload 路徑短）
     if want.contains('/') {
         let n = node_path.strip_suffix(want);
         if let Some(prefix) = n {
@@ -69,6 +71,17 @@ pub fn file_matches(node_path: &str, want: &str) -> bool {
             return prefix.is_empty() || prefix.ends_with('/');
         }
     }
+
+    // 反向：want 以 node_path 結尾（payload 路徑長，graph 路徑短）
+    // 去掉 graph 路徑的 `./` 前綴再比對
+    let clean_path = node_path.strip_prefix("./").unwrap_or(node_path);
+    if clean_path.contains('/') {
+        let n = want.strip_suffix(clean_path);
+        if let Some(prefix) = n {
+            return prefix.is_empty() || prefix.ends_with('/');
+        }
+    }
+
     false
 }
 
@@ -162,5 +175,22 @@ mod tests {
         assert!(!file_matches("src/auth.rs", "auth.rs")); // 純檔名不做 suffix
         assert!(!file_matches("src/foosrc/auth.rs", "src/auth.rs"));
         assert!(file_matches("src/foosrc/auth.rs", "src/foosrc/auth.rs"));
+    }
+
+    #[test]
+    fn file_matches_bidirectional() {
+        // 正向匹配（graph 路徑長，payload 路徑短）
+        assert!(file_matches("./src/auth.rs", "src/auth.rs")); // ./ 前綴被去除
+        assert!(file_matches("src/auth.rs", "src/auth.rs"));
+        assert!(file_matches("/repo/src/auth.rs", "src/auth.rs"));
+
+        // 反向匹配（payload 路徑長，graph 路徑短）
+        assert!(file_matches("src/auth.rs", "/repo/src/auth.rs")); // 絕對路徑匹配相對路徑
+        assert!(file_matches("./src/auth.rs", "/repo/src/auth.rs")); // 反向匹配，./ 被去除
+
+        // 負向匹配
+        assert!(!file_matches("./src/other.rs", "/repo/src/auth.rs"));
+        assert!(!file_matches("src/auth.rs", "auth.rs")); // 純檔名不做 suffix
+        assert!(!file_matches("src/foosrc/auth.rs", "src/auth.rs"));
     }
 }
